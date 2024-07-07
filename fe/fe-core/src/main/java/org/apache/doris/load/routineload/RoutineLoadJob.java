@@ -1780,7 +1780,7 @@ public abstract class RoutineLoadJob extends AbstractTxnStateChangeCallback impl
 
         out.writeLong(id);
         Text.writeString(out, name);
-        Text.writeString(out, SystemInfoService.DEFAULT_CLUSTER);
+        Text.writeString(out, pauseReason);
         out.writeLong(dbId);
         out.writeLong(tableId);
         out.writeInt(desireTaskConcurrentNum);
@@ -1827,8 +1827,7 @@ public abstract class RoutineLoadJob extends AbstractTxnStateChangeCallback impl
 
         id = in.readLong();
         name = Text.readString(in);
-        // cluster
-        Text.readString(in);
+        pauseReason = Text.readString(in);
         dbId = in.readLong();
         tableId = in.readLong();
         if (tableId == 0) {
