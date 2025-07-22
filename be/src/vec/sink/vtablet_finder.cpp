@@ -76,7 +76,10 @@ Status OlapTabletFinder::find_tablets(RuntimeState* state, Block* block, int row
             return Status::InternalError(ss.str());
         }
 
-        _partition_ids.emplace(partitions[row_index]->id);
+        {
+            std::lock_guard<std::mutex> lock(_partition_ids_mutex);
+            _partition_ids.emplace(partitions[row_index]->id);
+        }
 
         qualified_rows.push_back(row_index);
     }

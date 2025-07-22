@@ -55,7 +55,10 @@ public:
     bool is_single_tablet() { return _partition_to_tablet_map.size() == 1; }
 
     // all partitions for multi find-processes of its relative writer.
-    const vectorized::flat_hash_set<int64_t>& partition_ids() { return _partition_ids; }
+    vectorized::flat_hash_set<int64_t> partition_ids() {
+        std::lock_guard<std::mutex> lock(_partition_ids_mutex);
+        return _partition_ids;
+    }
 
     int64_t num_filtered_rows() const { return _num_filtered_rows; }
 
@@ -69,6 +72,7 @@ private:
     VOlapTablePartitionParam* _vpartition = nullptr;
     FindTabletMode _find_tablet_mode;
     std::map<VOlapTablePartition*, int64_t> _partition_to_tablet_map;
+    std::mutex _partition_ids_mutex;
     vectorized::flat_hash_set<int64_t> _partition_ids;
 
     int64_t _num_filtered_rows = 0;
