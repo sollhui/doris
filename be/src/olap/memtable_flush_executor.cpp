@@ -27,6 +27,7 @@
 #include "common/logging.h"
 #include "common/signal_handler.h"
 #include "olap/memtable.h"
+#include "olap/memtable_memory_limiter.h"
 #include "olap/rowset/rowset_writer.h"
 #include "olap/storage_engine.h"
 #include "runtime/thread_context.h"
@@ -35,6 +36,7 @@
 #include "util/metrics.h"
 #include "util/pretty_printer.h"
 #include "util/stopwatch.hpp"
+#include "util/system_metrics.h"
 #include "util/time.h"
 
 namespace doris {
@@ -293,6 +295,15 @@ void FlushToken::_flush_memtable(std::shared_ptr<MemTable> memtable_ptr, int32_t
     _stats.flush_disk_size_bytes += flush_size;
 }
 
+MemTableFlushExecutor::~MemTableFlushExecutor() {
+    if (_flush_pool) {
+        _flush_pool->shutdown();
+    }
+    if (_high_prio_flush_pool) {
+        _high_prio_flush_pool->shutdown();
+    }
+}
+
 void MemTableFlushExecutor::init(int num_disk) {
     _num_disk = std::max(1, num_disk);
     int num_cpus = std::thread::hardware_concurrency();
@@ -313,6 +324,9 @@ void MemTableFlushExecutor::init(int num_disk) {
                               .set_min_threads(min_threads)
                               .set_max_threads(max_threads)
                               .build(&_high_prio_flush_pool));
+
+    LOG(INFO) << "MemTableFlushExecutor initialized with " << _num_disk << " disks, "
+              << "flush pool threads: " << _flush_pool->num_threads();
 }
 
 void MemTableFlushExecutor::update_memtable_flush_threads() {

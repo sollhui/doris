@@ -60,6 +60,7 @@
 #include "olap/cumulative_compaction_policy.h"
 #include "olap/cumulative_compaction_time_series_policy.h"
 #include "olap/data_dir.h"
+#include "olap/memtable_flush_executor.h"
 #include "olap/olap_common.h"
 #include "olap/olap_define.h"
 #include "olap/rowset/segcompaction.h"
@@ -75,8 +76,10 @@
 #include "olap/task/engine_publish_version_task.h"
 #include "olap/task/index_builder.h"
 #include "runtime/client_cache.h"
+#include "runtime/exec_env.h"
 #include "runtime/memory/cache_manager.h"
 #include "runtime/memory/global_memory_arbitrator.h"
+#include "runtime/workload_group/workload_group_manager.h"
 #include "util/countdown_latch.h"
 #include "util/debug_points.h"
 #include "util/doris_metrics.h"
@@ -355,6 +358,49 @@ Status StorageEngine::start_bg_threads(std::shared_ptr<WorkloadGroup> wg_sptr) {
             [this]() { this->_check_tablet_delete_bitmap_score_callback(); },
             &_check_delete_bitmap_score_thread));
     LOG(INFO) << "check tablet delete bitmap score thread started";
+
+    // Initialize adaptive thread controller
+    if (config::enable_adaptive_flush_threads) {
+        auto* memory_limiter = ExecEnv::GetInstance()->memtable_memory_limiter();
+        auto* system_metrics = DorisMetrics::instance()->system_metrics();
+        auto* s3_upload_pool = ExecEnv::GetInstance()->s3_file_upload_thread_pool();
+
+        _adaptive_thread_controller.init(system_metrics, s3_upload_pool, _disk_num);
+
+        // Register global flush pools with flush-specific adjust logic
+        if (_memtable_flush_executor) {
+            auto* flush_pool = _memtable_flush_executor->flush_pool();
+            auto* high_prio_pool = _memtable_flush_executor->high_prio_flush_pool();
+            auto* controller = &_adaptive_thread_controller;
+            _adaptive_thread_controller.register_pool_group(
+                    "flush", {flush_pool, high_prio_pool},
+                    [memory_limiter, flush_pool, controller](int current, int min_t, int max_t) {
+                        int target = current;
+                        // Memory pressure -> +1
+                        if (memory_limiter != nullptr && memory_limiter->mem_usage() > 0) {
+                            target = std::min(max_t, target + 1);
+                        }
+                        // Queue > threshold -> +1
+                        if (flush_pool->get_queue_size() >
+                            AdaptiveThreadController::kQueueThreshold) {
+                            target = std::min(max_t, target + 1);
+                        }
+                        // IO busy -> -1
+                        if (controller->is_io_busy()) {
+                            target = std::max(min_t, target - 1);
+                        }
+                        // CPU busy -> -1
+                        if (controller->is_cpu_busy()) {
+                            target = std::max(min_t, target - 1);
+                        }
+                        return target;
+                    },
+                    config::max_flush_thread_num_per_cpu, config::min_flush_thread_num_per_cpu);
+        }
+
+        _adaptive_thread_controller.start();
+        LOG(INFO) << "adaptive thread controller started";
+    }
 
     LOG(INFO) << "all storage engine's background threads are started.";
     return Status::OK();

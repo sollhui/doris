@@ -33,7 +33,9 @@ namespace doris {
 
 class DataDir;
 class MemTable;
+class MemTableMemoryLimiter;
 class RowsetWriter;
+class SystemMetrics;
 class WorkloadGroup;
 
 // the statistic of a certain flush handler.
@@ -132,10 +134,7 @@ private:
 class MemTableFlushExecutor {
 public:
     MemTableFlushExecutor() = default;
-    ~MemTableFlushExecutor() {
-        _flush_pool->shutdown();
-        _high_prio_flush_pool->shutdown();
-    }
+    ~MemTableFlushExecutor();
 
     // init should be called after storage engine is opened,
     // because it needs path hash of each data dir.
@@ -162,6 +161,8 @@ public:
     void dec_flushing_task() { _flushing_task_count--; }
 
     ThreadPool* flush_pool() { return _flush_pool.get(); }
+
+    ThreadPool* high_prio_flush_pool() { return _high_prio_flush_pool.get(); }
 
     void update_memtable_flush_threads();
 

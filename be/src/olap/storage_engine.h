@@ -40,6 +40,7 @@
 #include "agent/task_worker_pool.h"
 #include "common/config.h"
 #include "common/status.h"
+#include "olap/adaptive_thread_controller.h"
 #include "olap/calc_delete_bitmap_executor.h"
 #include "olap/compaction_permit_limiter.h"
 #include "olap/olap_common.h"
@@ -140,6 +141,9 @@ public:
     RowsetId next_rowset_id();
 
     MemTableFlushExecutor* memtable_flush_executor() { return _memtable_flush_executor.get(); }
+    AdaptiveThreadController* adaptive_thread_controller() {
+        return &_adaptive_thread_controller;
+    }
     CalcDeleteBitmapExecutor* calc_delete_bitmap_executor() {
         return _calc_delete_bitmap_executor.get();
     }
@@ -176,6 +180,7 @@ protected:
 
     std::unique_ptr<RowsetIdGenerator> _rowset_id_generator;
     std::unique_ptr<MemTableFlushExecutor> _memtable_flush_executor;
+    AdaptiveThreadController _adaptive_thread_controller;
     std::unique_ptr<CalcDeleteBitmapExecutor> _calc_delete_bitmap_executor;
     std::unique_ptr<CalcDeleteBitmapExecutor> _calc_delete_bitmap_executor_for_load;
     CountDownLatch _stop_background_threads_latch;

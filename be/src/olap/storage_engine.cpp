@@ -769,6 +769,7 @@ void StorageEngine::stop() {
         _cooldown_thread_pool->shutdown();
     }
 
+    _adaptive_thread_controller.stop();
     _memtable_flush_executor.reset(nullptr);
     _calc_delete_bitmap_executor.reset(nullptr);
     _calc_delete_bitmap_executor_for_load.reset();

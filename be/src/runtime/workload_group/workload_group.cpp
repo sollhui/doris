@@ -32,6 +32,8 @@
 #include "exec/schema_scanner/schema_scanner_helper.h"
 #include "io/cache/block_file_cache_factory.h"
 #include "io/fs/local_file_reader.h"
+#include "olap/adaptive_thread_controller.h"
+#include "olap/memtable_memory_limiter.h"
 #include "olap/storage_engine.h"
 #include "pipeline/task_queue.h"
 #include "pipeline/task_scheduler.h"
@@ -41,10 +43,12 @@
 #include "runtime/memory/memory_reclamation.h"
 #include "runtime/workload_group/workload_group_metrics.h"
 #include "runtime/workload_management/io_throttle.h"
+#include "util/doris_metrics.h"
 #include "util/mem_info.h"
 #include "util/parse_util.h"
 #include "util/pretty_printer.h"
 #include "util/runtime_profile.h"
+#include "util/system_metrics.h"
 #include "util/threadpool.h"
 #include "vec/exec/scan/scanner_scheduler.h"
 
@@ -616,6 +620,30 @@ Status WorkloadGroup::upsert_thread_pool_no_lock(WorkloadGroupInfo* wg_info,
             LOG(INFO) << "[upsert wg thread pool] create " + pool_name + " succ, gid=" << wg_id
                       << ", max thread num=" << max_flush_thread_num
                       << ", min thread num=" << min_flush_thread_num;
+            // Register the new pool with adaptive thread controller
+            if (config::enable_adaptive_flush_threads) {
+                auto* memory_limiter = ExecEnv::GetInstance()->memtable_memory_limiter();
+                auto* controller = ExecEnv::GetInstance()
+                                           ->storage_engine()
+                                           .adaptive_thread_controller();
+                controller->register_pool_group(
+                        "flush_wg_" + std::to_string(_id), {_memtable_flush_pool.get()},
+                        [memory_limiter, controller](int current, int min_t, int max_t) {
+                            int target = current;
+                            if (memory_limiter != nullptr && memory_limiter->mem_usage() > 0) {
+                                target = std::min(max_t, target + 1);
+                            }
+                            if (controller->is_io_busy()) {
+                                target = std::max(min_t, target - 1);
+                            }
+                            if (controller->is_cpu_busy()) {
+                                target = std::max(min_t, target - 1);
+                            }
+                            return target;
+                        },
+                        config::max_flush_thread_num_per_cpu,
+                        config::min_flush_thread_num_per_cpu);
+            }
         } else {
             upsert_ret = ret;
             LOG(INFO) << "[upsert wg thread pool] create " + pool_name + " failed, gid=" << wg_id;
@@ -750,6 +778,7 @@ void WorkloadGroup::try_stop_schedulers() {
         _memtable_flush_pool->wait();
     }
 }
+
 
 void WorkloadGroup::update_memtable_flush_threads() {
     if (_memtable_flush_pool == nullptr) {
