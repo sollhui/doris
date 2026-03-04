@@ -125,6 +125,12 @@ void AdaptiveThreadController::_adjustment_loop() {
 }
 
 void AdaptiveThreadController::adjust_once() {
+    // Pre-compute once so all pool groups see the same IO/CPU state this cycle.
+    // is_io_busy() has side effects (updates _last_disk_io_time), so calling it
+    // multiple times within the same loop would give the second group stale results.
+    _cached_io_busy = is_io_busy() ? 1 : 0;
+    _cached_cpu_busy = is_cpu_busy() ? 1 : 0;
+
     std::lock_guard<std::mutex> lock(_groups_mutex);
     for (auto& group : _pool_groups) {
         if (group.pools.empty() || group.pools[0] == nullptr || !group.adjust_func) {
@@ -137,9 +143,15 @@ void AdaptiveThreadController::adjust_once() {
 
         _apply_thread_count(group, target);
     }
+
+    _cached_io_busy = -1;
+    _cached_cpu_busy = -1;
 }
 
 bool AdaptiveThreadController::is_io_busy() {
+    if (_cached_io_busy >= 0) {
+        return _cached_io_busy == 1;
+    }
     // For cloud mode (compute-storage separated), check S3 upload queue length
     if (config::is_cloud_mode()) {
         if (_s3_file_upload_pool == nullptr) {
@@ -177,6 +189,9 @@ bool AdaptiveThreadController::is_io_busy() {
 }
 
 bool AdaptiveThreadController::is_cpu_busy() {
+    if (_cached_cpu_busy >= 0) {
+        return _cached_cpu_busy == 1;
+    }
     if (_system_metrics == nullptr) {
         return false;
     }

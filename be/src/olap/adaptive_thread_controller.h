@@ -122,6 +122,11 @@ private:
     std::map<std::string, int64_t> _last_disk_io_time;
     int64_t _last_check_time_sec = 0;
 
+    // Per-cycle cache: computed once per adjust_once() so all groups see the same value.
+    // -1 means "not yet computed this cycle".
+    int _cached_io_busy = -1;
+    int _cached_cpu_busy = -1;
+
     // Background thread control
     std::atomic<bool> _stopped {true};
     std::thread _adjustment_thread;
