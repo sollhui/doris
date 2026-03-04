@@ -365,7 +365,7 @@ Status StorageEngine::start_bg_threads(std::shared_ptr<WorkloadGroup> wg_sptr) {
         auto* system_metrics = DorisMetrics::instance()->system_metrics();
         auto* s3_upload_pool = ExecEnv::GetInstance()->s3_file_upload_thread_pool();
 
-        _adaptive_thread_controller.init(system_metrics, s3_upload_pool, _disk_num);
+        _adaptive_thread_controller.init(system_metrics, s3_upload_pool);
 
         // Register global flush pools with flush-specific adjust logic
         if (_memtable_flush_executor) {

@@ -58,7 +58,7 @@ protected:
 // Test basic register and get_current_threads
 TEST_F(AdaptiveThreadControllerTest, TestRegisterPoolGroup) {
     AdaptiveThreadController controller;
-    controller.init(nullptr, nullptr, 4);
+    controller.init(nullptr, nullptr);
 
     // A simple adjust function that keeps current threads
     controller.register_pool_group(
@@ -76,7 +76,7 @@ TEST_F(AdaptiveThreadControllerTest, TestRegisterPoolGroup) {
 // Test registering multiple pool groups with different adjust logic
 TEST_F(AdaptiveThreadControllerTest, TestMultiplePoolGroups) {
     AdaptiveThreadController controller;
-    controller.init(nullptr, nullptr, 4);
+    controller.init(nullptr, nullptr);
 
     controller.register_pool_group(
             "group_a", {_pool.get()},
@@ -97,7 +97,7 @@ TEST_F(AdaptiveThreadControllerTest, TestStartDisabled) {
     config::enable_adaptive_flush_threads = false;
 
     AdaptiveThreadController controller;
-    controller.init(nullptr, nullptr, 4);
+    controller.init(nullptr, nullptr);
     controller.register_pool_group(
             "test", {_pool.get()},
             [](int current, int min_t, int max_t) { return current; }, 4, 0.5);
@@ -111,7 +111,7 @@ TEST_F(AdaptiveThreadControllerTest, TestCustomAdjustFunc) {
     config::enable_adaptive_flush_threads = true;
 
     AdaptiveThreadController controller;
-    controller.init(nullptr, nullptr, 4);
+    controller.init(nullptr, nullptr);
 
     int num_cpus = std::thread::hardware_concurrency();
     if (num_cpus <= 0) num_cpus = 1;
@@ -132,7 +132,7 @@ TEST_F(AdaptiveThreadControllerTest, TestClampToMinMax) {
     config::enable_adaptive_flush_threads = true;
 
     AdaptiveThreadController controller;
-    controller.init(nullptr, nullptr, 4);
+    controller.init(nullptr, nullptr);
 
     int num_cpus = std::thread::hardware_concurrency();
     if (num_cpus <= 0) num_cpus = 1;
@@ -161,7 +161,7 @@ TEST_F(AdaptiveThreadControllerTest, TestAdjustOnceNoChange) {
     config::enable_adaptive_flush_threads = true;
 
     AdaptiveThreadController controller;
-    controller.init(nullptr, nullptr, 4);
+    controller.init(nullptr, nullptr);
     controller.register_pool_group(
             "test", {_pool.get()},
             [](int current, int min_t, int max_t) { return current; }, 4, 0.5);
@@ -176,7 +176,7 @@ TEST_F(AdaptiveThreadControllerTest, TestStartStopLifecycle) {
     config::enable_adaptive_flush_threads = true;
 
     AdaptiveThreadController controller;
-    controller.init(nullptr, nullptr, 4);
+    controller.init(nullptr, nullptr);
     controller.register_pool_group(
             "test", {_pool.get()},
             [](int current, int min_t, int max_t) { return current; }, 4, 0.5);
@@ -195,7 +195,7 @@ TEST_F(AdaptiveThreadControllerTest, TestDestructorStops) {
 
     {
         AdaptiveThreadController controller;
-        controller.init(nullptr, nullptr, 4);
+        controller.init(nullptr, nullptr);
         controller.register_pool_group(
                 "test", {_pool.get()},
                 [](int current, int min_t, int max_t) { return current; }, 4, 0.5);
@@ -220,7 +220,7 @@ TEST_F(AdaptiveThreadControllerTest, TestRegisterAfterStart) {
     config::enable_adaptive_flush_threads = true;
 
     AdaptiveThreadController controller;
-    controller.init(nullptr, nullptr, 4);
+    controller.init(nullptr, nullptr);
     controller.register_pool_group(
             "group_a", {_pool.get()},
             [](int current, int min_t, int max_t) { return current; }, 4, 0.5);
@@ -242,7 +242,7 @@ TEST_F(AdaptiveThreadControllerTest, TestRegisterAfterStart) {
 // Test is_io_busy and is_cpu_busy with null system_metrics
 TEST_F(AdaptiveThreadControllerTest, TestIoBusyCpuBusyWithNullMetrics) {
     AdaptiveThreadController controller;
-    controller.init(nullptr, nullptr, 4);
+    controller.init(nullptr, nullptr);
 
     // Should return false when system_metrics is null
     EXPECT_FALSE(controller.is_io_busy());
@@ -254,7 +254,7 @@ TEST_F(AdaptiveThreadControllerTest, TestAdjustFuncWithControllerMethods) {
     config::enable_adaptive_flush_threads = true;
 
     AdaptiveThreadController controller;
-    controller.init(nullptr, nullptr, 4);
+    controller.init(nullptr, nullptr);
 
     auto* ctrl = &controller;
     controller.register_pool_group(

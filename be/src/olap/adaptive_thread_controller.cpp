@@ -51,10 +51,9 @@ AdaptiveThreadController::~AdaptiveThreadController() {
 }
 
 void AdaptiveThreadController::init(SystemMetrics* system_metrics,
-                                     ThreadPool* s3_file_upload_pool, int num_disk) {
+                                     ThreadPool* s3_file_upload_pool) {
     _system_metrics = system_metrics;
     _s3_file_upload_pool = s3_file_upload_pool;
-    _num_disk = std::max(1, num_disk);
 }
 
 void AdaptiveThreadController::register_pool_group(std::string name,
@@ -78,9 +77,24 @@ void AdaptiveThreadController::register_pool_group(std::string name,
               << ", min_threads=" << _pool_groups.back().get_min_threads();
 }
 
+void AdaptiveThreadController::unregister_pool_group(const std::string& name) {
+    std::lock_guard<std::mutex> lock(_groups_mutex);
+    auto it = std::find_if(_pool_groups.begin(), _pool_groups.end(),
+                           [&name](const PoolGroup& g) { return g.name == name; });
+    if (it != _pool_groups.end()) {
+        LOG(INFO) << "Adaptive: unregistered pool group '" << name << "'";
+        _pool_groups.erase(it);
+    }
+}
+
 void AdaptiveThreadController::start() {
     if (!config::enable_adaptive_flush_threads) {
         LOG(INFO) << "Adaptive thread controller is disabled";
+        return;
+    }
+
+    if (_adjustment_thread.joinable()) {
+        LOG(WARNING) << "Adaptive thread controller already started";
         return;
     }
 
@@ -224,18 +238,21 @@ void AdaptiveThreadController::_apply_thread_count(PoolGroup& group, int target_
               << " to " << target_threads << " (min=" << min_threads << ", max=" << max_threads
               << ")";
 
+    bool all_success = true;
     for (auto* pool : group.pools) {
         if (pool == nullptr) {
             continue;
         }
         Status st = pool->set_max_threads(target_threads);
         if (!st.ok()) {
+            all_success = false;
             LOG(WARNING) << "Adaptive[" << group.name
                          << "]: failed to set max threads: " << st;
         }
     }
-
-    group.current_threads = target_threads;
+    if (all_success) {
+        group.current_threads = target_threads;
+    }
 }
 
 } // namespace doris

@@ -774,6 +774,15 @@ void WorkloadGroup::try_stop_schedulers() {
         _remote_scan_task_sched->stop();
     }
     if (_memtable_flush_pool) {
+        // Unregister from adaptive controller before destroying the pool to avoid UAF:
+        // the adjustment loop holds raw ThreadPool* pointers and must not access them
+        // after the pool is gone.
+        if (config::enable_adaptive_flush_threads) {
+            auto* controller = ExecEnv::GetInstance()
+                                       ->storage_engine()
+                                       .adaptive_thread_controller();
+            controller->unregister_pool_group("flush_wg_" + std::to_string(_id));
+        }
         _memtable_flush_pool->shutdown();
         _memtable_flush_pool->wait();
     }

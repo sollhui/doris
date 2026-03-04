@@ -68,7 +68,7 @@ public:
     ~AdaptiveThreadController();
 
     // Initialize with system-level dependencies. Must be called before start().
-    void init(SystemMetrics* system_metrics, ThreadPool* s3_file_upload_pool, int num_disk);
+    void init(SystemMetrics* system_metrics, ThreadPool* s3_file_upload_pool);
 
     // Register a group of thread pools to be managed together.
     // Can be called before or after start().
@@ -80,6 +80,10 @@ public:
     void register_pool_group(std::string name, std::vector<ThreadPool*> pools,
                              AdjustFunc adjust_func, double max_threads_per_cpu,
                              double min_threads_per_cpu);
+
+    // Unregister a pool group by name. Must be called before the pools are destroyed
+    // to prevent use-after-free in the adjustment loop.
+    void unregister_pool_group(const std::string& name);
 
     void start();
     void stop();
@@ -113,7 +117,6 @@ private:
 private:
     SystemMetrics* _system_metrics = nullptr;
     ThreadPool* _s3_file_upload_pool = nullptr;
-    int _num_disk = 1;
 
     mutable std::mutex _groups_mutex;
     std::vector<PoolGroup> _pool_groups;
