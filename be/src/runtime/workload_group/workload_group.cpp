@@ -634,9 +634,7 @@ Status WorkloadGroup::upsert_thread_pool_no_lock(WorkloadGroupInfo* wg_info,
                             int target = current;
                             if (memory_limiter != nullptr &&
                                 memory_limiter->soft_limit_reached()) {
-                                LOG(INFO) << "Memory soft limit reached, current mem used: "
-                                          << PrettyPrinter::print(memory_limiter->current_usage(),
-                                                                  TUnit::BYTES);
+                                LOG(INFO) << "Memory soft limit reached";
                                 target = std::min(max_t, target + 1);
                             }
                             if (flush_pool->get_queue_size() >
