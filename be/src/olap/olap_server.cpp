@@ -378,19 +378,24 @@ Status StorageEngine::start_bg_threads(std::shared_ptr<WorkloadGroup> wg_sptr) {
                         int target = current;
                         // Memory pressure -> +1
                         if (memory_limiter != nullptr && memory_limiter->soft_limit_reached()) {
+                            LOG(INFO) << "Memory pressure detected for flush threads";
                             target = std::min(max_t, target + 1);
                         }
                         // Queue > threshold -> +1
                         if (flush_pool->get_queue_size() >
                             AdaptiveThreadController::kQueueThreshold) {
+                            LOG(INFO) << "Flush thread queue size " << flush_pool->get_queue_size()
+                                        << " exceeds threshold";
                             target = std::min(max_t, target + 1);
                         }
                         // IO busy -> -1
                         if (controller->is_io_busy()) {
+                            LOG(INFO) << "IO is busy";
                             target = std::max(min_t, target - 1);
                         }
                         // CPU busy -> -1
                         if (controller->is_cpu_busy()) {
+                            LOG(INFO) << "CPU is busy";
                             target = std::max(min_t, target - 1);
                         }
                         return target;
