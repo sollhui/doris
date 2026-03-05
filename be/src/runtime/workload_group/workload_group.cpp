@@ -626,11 +626,18 @@ Status WorkloadGroup::upsert_thread_pool_no_lock(WorkloadGroupInfo* wg_info,
                 auto* controller = ExecEnv::GetInstance()
                                            ->storage_engine()
                                            .adaptive_thread_controller();
+                auto* flush_pool = _memtable_flush_pool.get();
                 controller->register_pool_group(
-                        "flush_wg_" + std::to_string(_id), {_memtable_flush_pool.get()},
-                        [memory_limiter, controller](int current, int min_t, int max_t) {
+                        "flush_wg_" + std::to_string(_id), {flush_pool},
+                        [memory_limiter, flush_pool, controller](int current, int min_t,
+                                                                 int max_t) {
                             int target = current;
-                            if (memory_limiter != nullptr && memory_limiter->mem_usage() > 0) {
+                            if (memory_limiter != nullptr &&
+                                memory_limiter->soft_limit_reached()) {
+                                target = std::min(max_t, target + 1);
+                            }
+                            if (flush_pool->get_queue_size() >
+                                AdaptiveThreadController::kQueueThreshold) {
                                 target = std::min(max_t, target + 1);
                             }
                             if (controller->is_io_busy()) {

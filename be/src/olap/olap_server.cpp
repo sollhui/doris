@@ -377,7 +377,7 @@ Status StorageEngine::start_bg_threads(std::shared_ptr<WorkloadGroup> wg_sptr) {
                     [memory_limiter, flush_pool, controller](int current, int min_t, int max_t) {
                         int target = current;
                         // Memory pressure -> +1
-                        if (memory_limiter != nullptr && memory_limiter->mem_usage() > 0) {
+                        if (memory_limiter != nullptr && memory_limiter->soft_limit_reached()) {
                             target = std::min(max_t, target + 1);
                         }
                         // Queue > threshold -> +1
