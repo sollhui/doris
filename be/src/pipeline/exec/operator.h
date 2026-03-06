@@ -138,6 +138,8 @@ public:
         return Status::OK();
     }
 
+    virtual bool is_hash_join_probe() const { return false; }
+
     /**
      * Pipeline task is blockable means it will be blocked in the next run. So we should put the
      * pipeline task into the blocking task scheduler.
@@ -167,12 +169,14 @@ public:
      */
     [[nodiscard]] virtual bool is_shuffled_operator() const { return false; }
     /**
-     * Return True if this operator is followed by a shuffled operator.
+     * For multiple children's operators, return true if this is a shuffled operator or this is followed by a shuffled operator (HASH JOIN and SET OPERATION).
+     *
+     * For single child's operators, return true if this operator is followed by a shuffled operator.
      * For example, in the plan fragment:
      *   `UNION` -> `SHUFFLED HASH JOIN`
      * The `SHUFFLED HASH JOIN` is a shuffled operator so the UNION operator is followed by a shuffled operator.
      */
-    [[nodiscard]] bool followed_by_shuffled_operator() const {
+    [[nodiscard]] virtual bool followed_by_shuffled_operator() const {
         return _followed_by_shuffled_operator;
     }
     /**
@@ -262,7 +266,7 @@ public:
     virtual std::vector<Dependency*> execution_dependencies() { return {}; }
 
     Status filter_block(const vectorized::VExprContextSPtrs& expr_contexts,
-                        vectorized::Block* block, size_t column_to_keep);
+                        vectorized::Block* block);
 
     int64_t& estimate_memory_usage() { return _estimate_memory_usage; }
 
@@ -418,8 +422,8 @@ public:
 
         _spill_read_file_time =
                 ADD_TIMER_WITH_LEVEL(Base::custom_profile(), "SpillReadFileTime", 1);
-        _spill_read_derialize_block_timer =
-                ADD_TIMER_WITH_LEVEL(Base::custom_profile(), "SpillReadDerializeBlockTime", 1);
+        _spill_read_deserialize_block_timer =
+                ADD_TIMER_WITH_LEVEL(Base::custom_profile(), "SpillReadDeserializeBlockTime", 1);
 
         _spill_read_block_count = ADD_COUNTER_WITH_LEVEL(Base::custom_profile(),
                                                          "SpillReadBlockCount", TUnit::UNIT, 1);
@@ -494,7 +498,7 @@ public:
     RuntimeProfile::Counter* _spill_read_wait_in_queue_timer = nullptr;
 
     RuntimeProfile::Counter* _spill_read_file_time = nullptr;
-    RuntimeProfile::Counter* _spill_read_derialize_block_timer = nullptr;
+    RuntimeProfile::Counter* _spill_read_deserialize_block_timer = nullptr;
     RuntimeProfile::Counter* _spill_read_block_count = nullptr;
     // Total bytes of read data in Block format(in memory format)
     RuntimeProfile::Counter* _spill_read_block_data_size = nullptr;
