@@ -306,20 +306,24 @@ MemTableFlushExecutor::~MemTableFlushExecutor() {
 
 void MemTableFlushExecutor::init(int num_disk) {
     _num_disk = std::max(1, num_disk);
-    int num_cpus = std::thread::hardware_concurrency();
-    int min_threads = std::max(1, config::flush_thread_num_per_store);
-    int max_threads = num_cpus == 0 ? _num_disk * min_threads
-                                    : std::min(_num_disk * min_threads,
-                                               num_cpus * config::max_flush_thread_num_per_cpu);
+    int num_cpus = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+    int min_threads;
+    int max_threads;
+    if (config::enable_adaptive_flush_threads) {
+        min_threads = std::max(1, static_cast<int>(num_cpus * config::min_flush_thread_num_per_cpu));
+        max_threads =
+                std::max(min_threads,
+                         static_cast<int>(num_cpus * config::max_flush_thread_num_per_cpu));
+    } else {
+        min_threads = std::max(1, config::flush_thread_num_per_store);
+        max_threads = std::min(_num_disk * min_threads,
+                               num_cpus * config::max_flush_thread_num_per_cpu);
+    }
     static_cast<void>(ThreadPoolBuilder("MemTableFlushThreadPool")
                               .set_min_threads(min_threads)
                               .set_max_threads(max_threads)
                               .build(&_flush_pool));
 
-    min_threads = std::max(1, config::high_priority_flush_thread_num_per_store);
-    max_threads = num_cpus == 0 ? _num_disk * min_threads
-                                : std::min(_num_disk * min_threads,
-                                           num_cpus * config::max_flush_thread_num_per_cpu);
     static_cast<void>(ThreadPoolBuilder("MemTableHighPriorityFlushThreadPool")
                               .set_min_threads(min_threads)
                               .set_max_threads(max_threads)

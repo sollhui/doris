@@ -438,11 +438,22 @@ WorkloadGroupInfo WorkloadGroupInfo::parse_topic_info(
     num_cpus = std::thread::hardware_concurrency();
 #endif
     num_disk = std::max(1, num_disk);
-    int min_flush_thread_num = std::max(1, config::flush_thread_num_per_store);
-    int max_flush_thread_num = num_cpus == 0
+    int min_flush_thread_num;
+    int max_flush_thread_num;
+    if (config::enable_adaptive_flush_threads) {
+        int effective_cpus = num_cpus > 0 ? num_cpus : 1;
+        min_flush_thread_num =
+                std::max(1, static_cast<int>(effective_cpus * config::min_flush_thread_num_per_cpu));
+        max_flush_thread_num = std::max(
+                min_flush_thread_num,
+                static_cast<int>(effective_cpus * config::max_flush_thread_num_per_cpu));
+    } else {
+        min_flush_thread_num = std::max(1, config::flush_thread_num_per_store);
+        max_flush_thread_num = num_cpus == 0
                                        ? num_disk * min_flush_thread_num
                                        : std::min(num_disk * min_flush_thread_num,
                                                   num_cpus * config::max_flush_thread_num_per_cpu);
+    }
 
     // 12 memory low watermark
     int memory_low_watermark = MEMORY_LOW_WATERMARK_DEFAULT_VALUE;
