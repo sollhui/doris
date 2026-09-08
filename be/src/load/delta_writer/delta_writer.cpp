@@ -254,6 +254,9 @@ Status BaseDeltaWriter::cancel_with_status(const Status& st) {
         return Status::OK();
     }
     RETURN_IF_ERROR(_memtable_writer->cancel_with_status(st));
+    // Flush tasks can submit delete bitmap work, so stop them before cancelling
+    // the rowset builder and its rowset writer.
+    RETURN_IF_ERROR(_rowset_builder->cancel(st));
     _is_cancelled = true;
     return Status::OK();
 }

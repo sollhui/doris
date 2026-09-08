@@ -90,8 +90,20 @@ Status CalcDeleteBitmapToken::submit(BaseTabletSPtr tablet, TabletSchemaSPtr sch
 
 Status CalcDeleteBitmapToken::wait() {
     _thread_token->wait();
-    // all tasks complete here, don't need lock;
+    std::shared_lock rlock(_lock);
     return _status;
+}
+
+void CalcDeleteBitmapToken::cancel(const Status& st) {
+    DCHECK(!st.ok());
+    {
+        std::lock_guard wlock(_lock);
+        if (_status.ok()) {
+            _status = st;
+        }
+    }
+    // Do not hold _lock while waiting: running tasks may need it to report an error.
+    _thread_token->shutdown();
 }
 
 void CalcDeleteBitmapExecutor::init(const std::string& name, int max_threads) {

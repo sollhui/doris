@@ -365,6 +365,12 @@ BetaRowsetWriter::~BetaRowsetWriter() {
     WARN_IF_ERROR(_wait_flying_segcompaction(), "segment compaction failed");
 }
 
+void BaseBetaRowsetWriter::cancel_calc_delete_bitmap(const Status& st) {
+    if (_calc_delete_bitmap_token != nullptr) {
+        _calc_delete_bitmap_token->cancel(st);
+    }
+}
+
 Status BaseBetaRowsetWriter::init(const RowsetWriterContext& rowset_writer_context) {
     _context = rowset_writer_context;
     DCHECK(_context.tablet_schema != nullptr);

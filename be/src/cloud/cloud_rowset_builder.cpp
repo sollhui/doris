@@ -172,6 +172,12 @@ Status CloudGroupRowsetBuilder::wait_calc_delete_bitmap() {
     return _data_builder->wait_calc_delete_bitmap();
 }
 
+Status CloudGroupRowsetBuilder::cancel(const Status& st) {
+    RETURN_IF_ERROR(_data_builder->cancel(st));
+    RETURN_IF_ERROR(_row_binlog_builder->cancel(st));
+    return BaseRowsetBuilder::cancel(st);
+}
+
 void CloudGroupRowsetBuilder::update_tablet_stats() {
     _data_builder->update_tablet_stats();
     _row_binlog_builder->update_tablet_stats();

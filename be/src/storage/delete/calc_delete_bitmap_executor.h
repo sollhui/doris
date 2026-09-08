@@ -86,7 +86,7 @@ public:
     // wait all tasks in token to be completed.
     Status wait();
 
-    void cancel() { _thread_token->shutdown(); }
+    void cancel(const Status& st = Status::Cancelled("delete bitmap calculation cancelled"));
 
 private:
     std::unique_ptr<ThreadPoolToken> _thread_token;
