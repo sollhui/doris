@@ -30,9 +30,9 @@
 #include "runtime/thread_context.h"
 #include "runtime/workload_group/workload_group.h"
 #include "runtime/workload_group/workload_group_manager.h"
+#include "storage/delete/calc_delete_bitmap_executor.h"
 #include "storage/storage_engine.h"
 #include "util/debug_points.h"
-#include "util/threadpool_token_cancellation.h"
 
 namespace doris {
 
@@ -42,7 +42,7 @@ LoadChannel::LoadChannel(const UniqueId& load_id, int64_t timeout_s, bool is_hig
                          std::string sender_ip, int64_t backend_id, bool enable_profile,
                          int64_t wg_id)
         : _load_id(load_id),
-          _cancel_status(std::make_shared<ThreadPoolTokenCancellation>()),
+          _cancel_status(std::make_shared<DeleteBitmapCancellation>()),
           _timeout_s(timeout_s),
           _is_high_priority(is_high_priority),
           _sender_ip(std::move(sender_ip)),

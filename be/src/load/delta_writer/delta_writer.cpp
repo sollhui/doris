@@ -37,6 +37,7 @@
 #include "runtime/exec_env.h"
 #include "runtime/thread_context.h"
 #include "runtime/workload_management/resource_context.h"
+#include "storage/delete/calc_delete_bitmap_executor.h"
 #include "storage/olap_define.h"
 #include "storage/rowset/beta_rowset.h"
 #include "storage/rowset/beta_rowset_writer.h"
@@ -48,7 +49,6 @@
 #include "storage/tablet_info.h"
 #include "util/mem_info.h"
 #include "util/stopwatch.hpp"
-#include "util/threadpool_token_cancellation.h"
 #include "util/time.h"
 
 namespace doris {

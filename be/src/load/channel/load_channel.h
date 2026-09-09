@@ -40,7 +40,7 @@ class PTabletWriterAddBlockRequest;
 class PTabletWriterAddBlockResult;
 class OpenPartitionRequest;
 class BaseTabletsChannel;
-class ThreadPoolTokenCancellation;
+class DeleteBitmapCancellation;
 
 // A LoadChannel manages tablets channels for all indexes
 // corresponding to a certain load job
@@ -116,7 +116,7 @@ private:
     std::unordered_set<int64_t> _finished_channel_ids;
     // set to true if at least one tablets channel has been opened
     bool _opened = false;
-    const std::shared_ptr<ThreadPoolTokenCancellation> _cancel_status;
+    const std::shared_ptr<DeleteBitmapCancellation> _cancel_status;
 
     std::shared_ptr<ResourceContext> _resource_ctx;
 

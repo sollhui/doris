@@ -22,6 +22,7 @@
 #include <atomic>
 #include <iosfwd>
 #include <memory>
+#include <mutex>
 #include <shared_mutex>
 #include <string>
 #include <utility>
@@ -36,10 +37,29 @@
 
 namespace doris {
 
-class ThreadPoolTokenCancellation;
 class DataDir;
 class Tablet;
 enum RowsetTypePB : int;
+
+// Per-load cancellation shared by for-load and rowset-builder bitmap tokens.
+class DeleteBitmapCancellation {
+public:
+    bool ok() const { return _status.ok(); }
+    Status status() const { return _status.ok() ? Status::OK() : _status.status(); }
+
+    // Discard queued bitmap work and wait only for running tasks. No owner lock
+    // is needed; repeated cancellation retains the first error.
+    void cancel(const Status& reason);
+
+private:
+    friend class CalcDeleteBitmapToken;
+    void _register_token(const std::shared_ptr<ThreadPoolToken>& token);
+
+    AtomicStatus _status;
+    std::mutex _lock;
+    // Do not keep finished writers' tokens or their thread pools alive.
+    std::vector<std::weak_ptr<ThreadPoolToken>> _tokens;
+};
 
 // A thin wrapper of ThreadPoolToken to submit calc delete bitmap task.
 // Usage:
@@ -51,7 +71,7 @@ class CalcDeleteBitmapToken {
 public:
     explicit CalcDeleteBitmapToken(
             std::unique_ptr<ThreadPoolToken> thread_token,
-            std::shared_ptr<ThreadPoolTokenCancellation> load_cancel_status = nullptr);
+            std::shared_ptr<DeleteBitmapCancellation> load_cancel_status = nullptr);
     ~CalcDeleteBitmapToken();
 
     // calculate delete bitmap of `cur_segment` to historical `target_rowsets`
@@ -102,7 +122,7 @@ private:
     // Records the current status of the calc delete bitmap job.
     // Note: Once its value is set to Failed, it cannot return to SUCCESS.
     Status _status;
-    const std::shared_ptr<ThreadPoolTokenCancellation> _load_cancel_status;
+    const std::shared_ptr<DeleteBitmapCancellation> _load_cancel_status;
 };
 
 // CalcDeleteBitmapExecutor is responsible for calc delete bitmap concurrently.
@@ -116,7 +136,7 @@ public:
     void init(const std::string& name, int max_threads);
 
     std::unique_ptr<CalcDeleteBitmapToken> create_token(
-            std::shared_ptr<ThreadPoolTokenCancellation> load_cancel_status = nullptr);
+            std::shared_ptr<DeleteBitmapCancellation> load_cancel_status = nullptr);
 
 private:
     std::unique_ptr<ThreadPool> _thread_pool;

@@ -111,7 +111,7 @@ public:
     virtual Status cancel();
 
     // Set once, before publishing the channel or opening any writers.
-    void set_load_cancel_status(std::shared_ptr<ThreadPoolTokenCancellation> status) {
+    void set_load_cancel_status(std::shared_ptr<DeleteBitmapCancellation> status) {
         _load_cancel_status = std::move(status);
     }
 
@@ -172,7 +172,7 @@ protected:
     State _state;
 
     UniqueId _load_id;
-    std::shared_ptr<ThreadPoolTokenCancellation> _load_cancel_status;
+    std::shared_ptr<DeleteBitmapCancellation> _load_cancel_status;
 
     // initialized in open function
     int64_t _txn_id = -1;

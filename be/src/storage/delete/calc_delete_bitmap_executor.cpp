@@ -24,20 +24,50 @@
 #include "common/logging.h"
 #include "load/memtable/memtable.h"
 #include "storage/tablet/base_tablet.h"
-#include "util/threadpool_token_cancellation.h"
 #include "util/time.h"
 
 namespace doris {
 using namespace ErrorCode;
 
+void DeleteBitmapCancellation::_register_token(const std::shared_ptr<ThreadPoolToken>& token) {
+    {
+        std::lock_guard lock(_lock);
+        if (_status.ok()) {
+            _tokens.emplace_back(token);
+            return;
+        }
+    }
+    // A token created after cancellation must reject submissions too.
+    token->shutdown();
+}
+
+void DeleteBitmapCancellation::cancel(const Status& reason) {
+    DCHECK(!reason.ok());
+    std::vector<std::shared_ptr<ThreadPoolToken>> tokens;
+    {
+        std::lock_guard lock(_lock);
+        _status.update(reason);
+        for (const auto& weak_token : _tokens) {
+            if (auto token = weak_token.lock()) {
+                tokens.push_back(std::move(token));
+            }
+        }
+    }
+    // Publish to all tasks before waiting. Neither registration nor task completion
+    // needs to wait for this lock while shutdown waits for running tasks.
+    for (const auto& token : tokens) {
+        token->shutdown();
+    }
+}
+
 CalcDeleteBitmapToken::CalcDeleteBitmapToken(
         std::unique_ptr<ThreadPoolToken> thread_token,
-        std::shared_ptr<ThreadPoolTokenCancellation> load_cancel_status)
+        std::shared_ptr<DeleteBitmapCancellation> load_cancel_status)
         : _thread_token(std::move(thread_token)),
           _status(Status::OK()),
           _load_cancel_status(std::move(load_cancel_status)) {
     if (_load_cancel_status) {
-        _load_cancel_status->register_token(_thread_token);
+        _load_cancel_status->_register_token(_thread_token);
     }
 }
 
@@ -119,7 +149,7 @@ void CalcDeleteBitmapExecutor::init(const std::string& name, int max_threads) {
 }
 
 std::unique_ptr<CalcDeleteBitmapToken> CalcDeleteBitmapExecutor::create_token(
-        std::shared_ptr<ThreadPoolTokenCancellation> load_cancel_status) {
+        std::shared_ptr<DeleteBitmapCancellation> load_cancel_status) {
     return std::make_unique<CalcDeleteBitmapToken>(
             _thread_pool->new_token(ThreadPool::ExecutionMode::CONCURRENT),
             std::move(load_cancel_status));
