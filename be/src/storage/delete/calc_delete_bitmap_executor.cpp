@@ -19,7 +19,6 @@
 
 #include <gen_cpp/olap_file.pb.h>
 
-#include <chrono>
 #include <ostream>
 
 #include "common/logging.h"
@@ -78,18 +77,7 @@ Status CalcDeleteBitmapToken::_get_status() {
 }
 
 Status CalcDeleteBitmapToken::wait() {
-    if (_load_cancel_status) {
-        // The waiter may hold channel/writer locks needed by synchronous cancellation.
-        // Let it drain its own token when the independently published signal arrives.
-        while (!_thread_token->wait_for(std::chrono::milliseconds(100))) {
-            if (!_load_cancel_status->ok()) {
-                cancel(_load_cancel_status->status());
-                break;
-            }
-        }
-    } else {
-        _thread_token->wait();
-    }
+    _thread_token->wait();
     return _get_status();
 }
 

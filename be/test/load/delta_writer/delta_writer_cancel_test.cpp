@@ -281,11 +281,13 @@ TEST_P(DeltaWriterCancelTest, LoadCancelWhileCloseHoldsLocks) {
     request.set_cancel_reason("sender cancelled while close waits");
     auto canceller = std::async(std::launch::async, [&] { return manager.cancel(request); });
     auto cancel_ready = canceller.wait_for(std::chrono::seconds(10));
-    auto wait_ready = waiter.wait_for(std::chrono::seconds(10));
+    // The signal does not drain the queue. wait() completes after workers dequeue
+    // and skip the cancelled tasks, even while close retains its locks.
+    EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    EXPECT_EQ(_pool->get_queue_size(), _tokens.size());
     // Always unblock the pool before joining, including when the regression reappears.
     _release_worker.count_down();
     EXPECT_EQ(cancel_ready, std::future_status::ready);
-    EXPECT_EQ(wait_ready, std::future_status::ready);
     EXPECT_TRUE(canceller.get().ok());
     const auto cancelled = Status::Cancelled(request.cancel_reason());
     for (const auto& st : waiter.get()) {
