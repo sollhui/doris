@@ -200,7 +200,6 @@ Status BaseDeltaWriter::wait_flush() {
 }
 
 Status BaseDeltaWriter::flush_memtable_async() {
-    RETURN_IF_ERROR(_get_load_cancel_status());
     return _memtable_writer->flush_async();
 }
 
