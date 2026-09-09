@@ -162,6 +162,7 @@ Status FlushToken::_submit_sub_tasks(ThreadPool* pool,
 }
 
 Status FlushToken::submit(std::shared_ptr<MemTable> mem_table) {
+    RETURN_IF_ERROR(_get_load_cancel_status());
     {
         std::shared_lock rdlk(_flush_status_lock);
         DBUG_EXECUTE_IF("FlushToken.submit_flush_error", {
@@ -238,7 +239,21 @@ void FlushToken::_flush_group_memtable(std::shared_ptr<SharedMemtable> shared_me
 // so we don't need to make them mutually exclusive, std::atomic is enough.
 void FlushToken::_wait_submit_task_finish() {
     std::unique_lock<std::mutex> lock(_mutex);
-    _submit_task_finish_cond.wait(lock, [&]() { return _stats.flush_submit_count.load() == 0; });
+    if (_load_cancel_status) {
+        while (_stats.flush_submit_count.load() != 0) {
+            if (!_load_cancel_status->ok()) {
+                lock.unlock();
+                // Queued tasks skip work on shutdown or when their weak token expires.
+                // Running tasks must finish before close can release their resources.
+                cancel();
+                return;
+            }
+            _submit_task_finish_cond.wait_for(lock, std::chrono::milliseconds(100));
+        }
+    } else {
+        _submit_task_finish_cond.wait(lock,
+                                      [&]() { return _stats.flush_submit_count.load() == 0; });
+    }
 }
 
 void FlushToken::_wait_running_task_finish() {
@@ -259,7 +274,7 @@ Status FlushToken::wait() {
             return _flush_status;
         }
     }
-    return Status::OK();
+    return _get_load_cancel_status();
 }
 
 Status FlushToken::_try_reserve_memory(const std::shared_ptr<ResourceContext>& resource_context,
@@ -406,6 +421,7 @@ void FlushToken::_flush_memtable_impl(RowsetWriter* flush_writer, MemTable* memt
             // }};
             std::shared_ptr<Block> flush_block;
             RETURN_IF_ERROR(_memtable2block(memtable, shared_memtable, flush_block));
+            RETURN_IF_ERROR(_get_load_cancel_status());
             RETURN_IF_ERROR(
                     flush_writer->flush_memtable(flush_block.get(), segment_id, &flush_size));
             memtable->set_flush_success();

@@ -19,14 +19,21 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "cloud/cloud_delta_writer.h"
 #include "cloud/cloud_rowset_builder.h"
 #include "cloud/cloud_rowset_writer.h"
 #include "cloud/cloud_storage_engine.h"
+#include "cloud/cloud_tablets_channel.h"
+#include "load/channel/load_channel_mgr.h"
+#include "load/channel/tablets_channel.h"
 #include "load/delta_writer/delta_writer.h"
+#include "runtime/exec_env.h"
+#include "runtime/fragment_mgr.h"
 #include "runtime/memory/mem_tracker_limiter.h"
 #include "runtime/thread_context.h"
 #include "storage/delete/calc_delete_bitmap_executor.h"
@@ -51,10 +58,15 @@ protected:
                             .set_max_threads(1)
                             .build(&_pool)
                             .ok());
+        _previous_fragment_mgr = ExecEnv::GetInstance()->_fragment_mgr;
+        _fragment_mgr = std::make_unique<FragmentMgr>(ExecEnv::GetInstance());
+        ExecEnv::GetInstance()->_fragment_mgr = _fragment_mgr.get();
+        _load_channel = std::make_shared<LoadChannel>(UniqueId {}, 60, false, "", 0, false, -1);
         WriteRequest data_req;
-        WriteRequest group_req;
+        data_req.load_cancel_status = _load_channel->_cancel_status;
+        WriteRequest group_req = data_req;
         group_req.write_req_type = WriteRequestType::GROUP;
-        WriteRequest binlog_req;
+        WriteRequest binlog_req = data_req;
         binlog_req.write_req_type = WriteRequestType::ROW_BINLOG;
         if (is_cloud()) {
             _cloud_engine = std::make_unique<CloudStorageEngine>(EngineOptions {});
@@ -95,6 +107,12 @@ protected:
         _pool.reset();
         _cloud_engine.reset();
         _local_engine.reset();
+        _load_channel.reset();
+        if (_fragment_mgr) {
+            _fragment_mgr->stop();
+            ExecEnv::GetInstance()->_fragment_mgr = _previous_fragment_mgr;
+            _fragment_mgr.reset();
+        }
         _attach_task.reset();
     }
 
@@ -127,9 +145,13 @@ protected:
 
     std::unique_ptr<CalcDeleteBitmapToken> make_token() {
         return std::make_unique<CalcDeleteBitmapToken>(
-                _pool->new_token(ThreadPool::ExecutionMode::CONCURRENT));
+                _pool->new_token(ThreadPool::ExecutionMode::CONCURRENT),
+                _load_channel->_cancel_status);
     }
 
+    FragmentMgr* _previous_fragment_mgr = nullptr;
+    std::unique_ptr<FragmentMgr> _fragment_mgr;
+    std::shared_ptr<LoadChannel> _load_channel;
     std::unique_ptr<AttachTask> _attach_task;
     std::unique_ptr<StorageEngine> _local_engine;
     std::unique_ptr<CloudStorageEngine> _cloud_engine;
@@ -191,12 +213,150 @@ TEST_P(DeltaWriterCancelTest, PreserveEarlierCalculationFailure) {
     const auto failure = Status::InternalError("delete bitmap calculation failed");
     ASSERT_TRUE(_tokens.front()->submit_func([failure] { return failure; }).ok());
     ASSERT_EQ(_tokens.front()->wait(), failure);
+    ASSERT_TRUE(_load_channel->cancel().ok());
     ASSERT_TRUE(_writer->cancel().ok());
     EXPECT_EQ(_tokens.front()->wait(), failure);
     EXPECT_EQ(_tokens.front()->submit_func([] { return Status::OK(); }), failure);
     for (size_t i = 1; i < _tokens.size(); ++i) {
         EXPECT_TRUE(_tokens[i]->wait().is<ErrorCode::CANCELLED>());
     }
+}
+
+// Model close() holding the channel and builder locks while its bitmap tokens wait.
+// Cancellation must publish through the manager without taking any of those locks.
+TEST_P(DeltaWriterCancelTest, LoadCancelWhileCloseHoldsLocks) {
+    install_tokens();
+    ASSERT_TRUE(_pool->submit_func([this] {
+                         _worker_started.count_down();
+                         _release_worker.wait();
+                     }).ok());
+    ASSERT_TRUE(_worker_started.wait_for(std::chrono::seconds(10)));
+    for (auto* token : _tokens) {
+        ASSERT_TRUE(token->submit_func([this] {
+                             ++_executed;
+                             return Status::OK();
+                         }).ok());
+    }
+
+    PUniqueId id;
+    TabletsChannelKey key(id, 1);
+    std::shared_ptr<BaseTabletsChannel> tablets_channel;
+    if (is_cloud()) {
+        tablets_channel = std::make_shared<CloudTabletsChannel>(*_cloud_engine, key, UniqueId {},
+                                                                false, nullptr);
+    } else {
+        tablets_channel =
+                std::make_shared<TabletsChannel>(*_local_engine, key, UniqueId {}, false, nullptr);
+    }
+    tablets_channel->set_load_cancel_status(_load_channel->_cancel_status);
+    _load_channel->_tablets_channels.emplace(1, tablets_channel);
+    LoadChannelMgr manager;
+    manager._load_state_channels = std::make_unique<LoadChannelMgr::LoadStateChannelCache>(16);
+    manager._load_channels.emplace(UniqueId {}, _load_channel);
+
+    CountDownLatch locks_held(1);
+    auto waiter = std::async(std::launch::async, [&] {
+        std::lock_guard load_lock(_load_channel->_lock);
+        std::lock_guard channel_lock(tablets_channel->_lock);
+        std::unique_lock<std::mutex> local_writer_lock;
+        std::unique_lock<bthread::Mutex> cloud_writer_lock;
+        if (is_cloud()) {
+            cloud_writer_lock =
+                    std::unique_lock(static_cast<CloudDeltaWriter*>(_writer.get())->_mtx);
+        } else {
+            local_writer_lock = std::unique_lock(static_cast<DeltaWriter*>(_writer.get())->_lock);
+        }
+        std::lock_guard builder_lock(_builders.front()->_lock);
+        locks_held.count_down();
+        std::vector<Status> statuses;
+        for (auto* token : _tokens) {
+            statuses.push_back(token->wait());
+        }
+        return statuses;
+    });
+    bool entered = locks_held.wait_for(std::chrono::seconds(10));
+    EXPECT_TRUE(entered);
+    PTabletWriterCancelRequest request;
+    *request.mutable_id() = id;
+    request.set_cancel_reason("sender cancelled while close waits");
+    auto canceller = std::async(std::launch::async, [&] { return manager.cancel(request); });
+    auto cancel_ready = canceller.wait_for(std::chrono::seconds(10));
+    auto wait_ready = waiter.wait_for(std::chrono::seconds(10));
+    // Always unblock the pool before joining, including when the regression reappears.
+    _release_worker.count_down();
+    EXPECT_EQ(cancel_ready, std::future_status::ready);
+    EXPECT_EQ(wait_ready, std::future_status::ready);
+    EXPECT_TRUE(canceller.get().ok());
+    const auto cancelled = Status::Cancelled(request.cancel_reason());
+    for (const auto& st : waiter.get()) {
+        EXPECT_EQ(st, cancelled);
+    }
+    EXPECT_EQ(_executed.load(), 0);
+    EXPECT_TRUE(manager._load_channels.empty());
+    EXPECT_EQ(_writer->submit_calc_delete_bitmap_task(), cancelled);
+    EXPECT_TRUE(_load_channel->cancel(Status::Cancelled("second cancel")).ok());
+    EXPECT_EQ(_load_channel->cancel_status(), cancelled);
+
+    // A late successful close must not overwrite the cancellation tombstone.
+    manager._finish_load_channel(UniqueId {});
+    PTabletWriterAddBlockRequest add_request;
+    *add_request.mutable_id() = id;
+    add_request.set_eos(true);
+    std::shared_ptr<LoadChannel> channel;
+    bool is_eof = false;
+    auto st = manager._get_load_channel(channel, is_eof, UniqueId {}, add_request);
+    EXPECT_TRUE(st.is<ErrorCode::CANCELLED>());
+    EXPECT_FALSE(is_eof);
+    PTabletWriterOpenRequest open_request;
+    *open_request.mutable_id() = id;
+    EXPECT_TRUE(manager.open(open_request).is<ErrorCode::CANCELLED>());
+}
+
+TEST_P(DeltaWriterCancelTest, QueuedTasksObserveLoadCancellationWithoutWait) {
+    install_tokens();
+    ASSERT_TRUE(_pool->submit_func([this] {
+                         _worker_started.count_down();
+                         _release_worker.wait();
+                     }).ok());
+    ASSERT_TRUE(_worker_started.wait_for(std::chrono::seconds(10)));
+    for (auto* token : _tokens) {
+        ASSERT_TRUE(token->submit_func([this] {
+                             ++_executed;
+                             return Status::OK();
+                         }).ok());
+    }
+    const auto cancelled = Status::Cancelled("load cancelled before queued tasks start");
+    ASSERT_TRUE(_load_channel->cancel(cancelled).ok());
+    // Allow workers to dequeue the tasks before calling wait/cancel on any writer or token.
+    _release_worker.count_down();
+    _pool->wait();
+    EXPECT_EQ(_executed.load(), 0);
+    auto late_token = make_token();
+    EXPECT_EQ(late_token->submit_func([] { return Status::OK(); }), cancelled);
+    for (auto* token : _tokens) {
+        EXPECT_EQ(token->wait(), cancelled);
+        EXPECT_EQ(token->submit_func([] { return Status::OK(); }), cancelled);
+    }
+}
+
+TEST_P(DeltaWriterCancelTest, RunningTaskFinishesBeforeCancelledWaitReturns) {
+    install_tokens();
+    ASSERT_TRUE(_tokens.front()
+                        ->submit_func([this] {
+                            _worker_started.count_down();
+                            _release_worker.wait();
+                            ++_executed;
+                            return Status::OK();
+                        })
+                        .ok());
+    ASSERT_TRUE(_worker_started.wait_for(std::chrono::seconds(10)));
+    const auto cancelled = Status::Cancelled("cancel running load");
+    ASSERT_TRUE(_load_channel->cancel(cancelled).ok());
+    auto waiter = std::async(std::launch::async, [&] { return _tokens.front()->wait(); });
+    EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(200)), std::future_status::timeout);
+    _release_worker.count_down();
+    EXPECT_EQ(waiter.get(), cancelled);
+    EXPECT_EQ(_executed.load(), 1);
 }
 
 INSTANTIATE_TEST_SUITE_P(LocalAndCloud, DeltaWriterCancelTest, testing::Values(0, 1, 2, 3));

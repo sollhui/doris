@@ -59,7 +59,12 @@ public:
     // return true if this load channel has been opened and all tablets channels are closed then.
     bool is_finished();
 
-    Status cancel();
+    // Signal only: never wait for channel/writer locks or running work. In-flight
+    // requests retain the channel; writers are drained when its last owner releases it.
+    Status cancel(const Status& reason = Status::Cancelled("load channel cancelled"));
+    Status cancel_status() const {
+        return _cancel_status->ok() ? Status::OK() : _cancel_status->status();
+    }
 
     time_t last_updated_time() const { return _last_updated_time.load(); }
 
@@ -69,7 +74,7 @@ public:
 
     bool is_high_priority() const { return _is_high_priority; }
 
-    bool is_cancelled() const { return _cancelled.load(); }
+    bool is_cancelled() const { return !_cancel_status->ok(); }
 
     WorkloadGroupPtr workload_group() const { return _resource_ctx->workload_group(); }
 
@@ -112,7 +117,7 @@ private:
     std::unordered_set<int64_t> _finished_channel_ids;
     // set to true if at least one tablets channel has been opened
     bool _opened = false;
-    std::atomic<bool> _cancelled {false};
+    const std::shared_ptr<AtomicStatus> _cancel_status = std::make_shared<AtomicStatus>();
 
     std::shared_ptr<ResourceContext> _resource_ctx;
 

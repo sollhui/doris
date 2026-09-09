@@ -106,6 +106,7 @@ void LoadChannel::_init_profile() {
 }
 
 Status LoadChannel::open(const PTabletWriterOpenRequest& params) {
+    RETURN_IF_ERROR(cancel_status());
     if (config::is_cloud_mode() && params.txn_expiration() <= 0) {
         return Status::InternalError(
                 "The txn expiration of PTabletWriterOpenRequest is invalid, value={}",
@@ -139,6 +140,7 @@ Status LoadChannel::open(const PTabletWriterOpenRequest& params) {
                 channel = std::make_shared<TabletsChannel>(engine.to_local(), key, _load_id,
                                                            _is_high_priority, _self_profile);
             }
+            channel->set_load_cancel_status(_cancel_status);
             {
                 std::lock_guard<std::mutex> lt(_tablets_channels_lock);
                 _tablets_channels.insert({index_id, channel});
@@ -180,6 +182,7 @@ Status LoadChannel::_get_tablets_channel(std::shared_ptr<BaseTabletsChannel>& ch
 
 Status LoadChannel::add_batch(const PTabletWriterAddBlockRequest& request,
                               PTabletWriterAddBlockResult* response) {
+    RETURN_IF_ERROR(cancel_status());
     DBUG_EXECUTE_IF("LoadChannel.add_batch.failed",
                     { return Status::InternalError("fault injection"); });
     SCOPED_TIMER(_add_batch_timer);
@@ -304,12 +307,9 @@ bool LoadChannel::is_finished() {
     return _tablets_channels.empty();
 }
 
-Status LoadChannel::cancel() {
-    _cancelled.store(true);
-    std::lock_guard<std::mutex> l(_lock);
-    for (auto& it : _tablets_channels) {
-        static_cast<void>(it.second->cancel());
-    }
+Status LoadChannel::cancel(const Status& reason) {
+    DCHECK(!reason.ok());
+    _cancel_status->update(reason);
     return Status::OK();
 }
 

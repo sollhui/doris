@@ -122,11 +122,23 @@ public:
         _table_schema_param = std::move(table_schema_param);
     }
 
+    // Set before submitting any tasks.
+    void set_load_cancel_status(std::shared_ptr<AtomicStatus> status) {
+        _load_cancel_status = std::move(status);
+    }
+
     const MemTableStat& memtable_stat() { return _memtable_stat; }
 
 private:
     void _shutdown_flush_token() { _shutdown.store(true); }
-    bool _is_shutdown() { return _shutdown.load(); }
+    bool _is_shutdown() {
+        return _shutdown.load() || (_load_cancel_status && !_load_cancel_status->ok());
+    }
+    Status _get_load_cancel_status() const {
+        return _load_cancel_status && !_load_cancel_status->ok() ? _load_cancel_status->status()
+                                                                 : Status::OK();
+    }
+    std::shared_ptr<AtomicStatus> _load_cancel_status;
     void _wait_submit_task_finish();
     void _wait_running_task_finish();
 

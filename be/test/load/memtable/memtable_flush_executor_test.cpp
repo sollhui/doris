@@ -26,6 +26,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <string>
 #include <thread>
 
@@ -48,6 +49,8 @@
 #include "storage/tablet/tablet_meta_manager.h"
 #include "storage/utils.h"
 #include "testutil/creators.h"
+#include "util/countdown_latch.h"
+#include "util/defer_op.h"
 
 namespace doris {
 
@@ -720,6 +723,53 @@ TEST_F(MemTableFlushExecutorGroupFlushTest, TestGroupFlushTokenCancelledCleanup)
     EXPECT_EQ(0, data_flush_cnt.load());
     EXPECT_EQ(0, binlog_flush_cnt.load());
 
+    drop_tablet(ctx.request);
+}
+
+TEST_F(MemTableFlushExecutorGroupFlushTest, LoadCancellationUnblocksQueuedFlushWait) {
+    SCOPED_INIT_THREAD_CONTEXT();
+    GroupFlushTestContext ctx;
+    prepare_group_flush_test_context(10007, 270068379, {7000, 7001}, &ctx);
+    std::atomic<int> data_flush_cnt = 0;
+    std::atomic<int> binlog_flush_cnt = 0;
+    auto data_writer = std::make_shared<MockRowsetWriter>(&data_flush_cnt);
+    auto binlog_writer = std::make_shared<MockRowsetWriter>(&binlog_flush_cnt);
+    std::shared_ptr<GroupRowsetWriter> group_writer;
+    ASSERT_TRUE(create_group_rowset_writer(ctx, 7, data_writer, binlog_writer, &group_writer).ok());
+    std::unique_ptr<ThreadPool> pool;
+    ASSERT_TRUE(ThreadPoolBuilder("LoadCancelledFlushTest")
+                        .set_min_threads(1)
+                        .set_max_threads(1)
+                        .build(&pool)
+                        .ok());
+    CountDownLatch worker_started(1);
+    CountDownLatch release_worker(1);
+    // Also release on assertion failures, before the pool is destroyed.
+    Defer release([&] { release_worker.count_down(); });
+    ASSERT_TRUE(pool->submit_func([&] {
+                        worker_started.count_down();
+                        release_worker.wait();
+                    }).ok());
+    ASSERT_TRUE(worker_started.wait_for(std::chrono::seconds(10)));
+    std::shared_ptr<FlushToken> token;
+    ASSERT_TRUE(create_group_flush_token(ctx, group_writer, &token, pool.get()).ok());
+    auto cancel_status = std::make_shared<AtomicStatus>();
+    token->set_load_cancel_status(cancel_status);
+    ASSERT_TRUE(token->submit(ctx.memtable).ok());
+    ASSERT_EQ(pool->get_queue_size(), 2);
+    auto waiter = std::async(std::launch::async, [&] { return token->wait(); });
+    const auto cancelled = Status::Cancelled("cancel load with queued group flush");
+    cancel_status->update(cancelled);
+    auto ready = waiter.wait_for(std::chrono::seconds(10));
+    release_worker.count_down();
+    EXPECT_EQ(ready, std::future_status::ready);
+    EXPECT_EQ(waiter.get(), cancelled);
+    pool->wait();
+    EXPECT_EQ(data_flush_cnt.load(), 0);
+    EXPECT_EQ(binlog_flush_cnt.load(), 0);
+    EXPECT_EQ(token->get_stats().flush_submit_count.load(), 0);
+    EXPECT_EQ(token->get_stats().flush_running_count.load(), 0);
+    EXPECT_EQ(token->submit(ctx.memtable), cancelled);
     drop_tablet(ctx.request);
 }
 
