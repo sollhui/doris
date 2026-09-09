@@ -48,6 +48,7 @@
 #include "storage/tablet_info.h"
 #include "util/mem_info.h"
 #include "util/stopwatch.hpp"
+#include "util/threadpool_token_cancellation.h"
 #include "util/time.h"
 
 namespace doris {
@@ -139,6 +140,10 @@ int64_t BaseDeltaWriter::table_id() const {
 }
 
 DeltaWriter::~DeltaWriter() = default;
+
+Status BaseDeltaWriter::_get_load_cancel_status() const {
+    return _req.load_cancel_status ? _req.load_cancel_status->status() : Status::OK();
+}
 
 Status BaseDeltaWriter::init() {
     RETURN_IF_ERROR(_get_load_cancel_status());

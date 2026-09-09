@@ -32,6 +32,7 @@
 #include "runtime/workload_group/workload_group_manager.h"
 #include "storage/storage_engine.h"
 #include "util/debug_points.h"
+#include "util/threadpool_token_cancellation.h"
 
 namespace doris {
 
@@ -41,6 +42,7 @@ LoadChannel::LoadChannel(const UniqueId& load_id, int64_t timeout_s, bool is_hig
                          std::string sender_ip, int64_t backend_id, bool enable_profile,
                          int64_t wg_id)
         : _load_id(load_id),
+          _cancel_status(std::make_shared<ThreadPoolTokenCancellation>()),
           _timeout_s(timeout_s),
           _is_high_priority(is_high_priority),
           _sender_ip(std::move(sender_ip)),
@@ -308,9 +310,16 @@ bool LoadChannel::is_finished() {
 }
 
 Status LoadChannel::cancel(const Status& reason) {
-    DCHECK(!reason.ok());
-    _cancel_status->update(reason);
+    _cancel_status->cancel(reason);
     return Status::OK();
+}
+
+Status LoadChannel::cancel_status() const {
+    return _cancel_status->status();
+}
+
+bool LoadChannel::is_cancelled() const {
+    return !_cancel_status->ok();
 }
 
 } // namespace doris

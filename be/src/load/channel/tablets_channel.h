@@ -111,7 +111,7 @@ public:
     virtual Status cancel();
 
     // Set once, before publishing the channel or opening any writers.
-    void set_load_cancel_status(std::shared_ptr<AtomicStatus> status) {
+    void set_load_cancel_status(std::shared_ptr<ThreadPoolTokenCancellation> status) {
         _load_cancel_status = std::move(status);
     }
 
@@ -128,13 +128,7 @@ public:
 
 protected:
     // Caller holds _lock. The cancellation publisher never needs this lock.
-    Status _check_cancelled() {
-        if (_load_cancel_status && !_load_cancel_status->ok()) {
-            _close_status = _load_cancel_status->status();
-            return _close_status;
-        }
-        return Status::OK();
-    }
+    Status _check_cancelled();
 
     Status _init_adaptive_random_bucket_state(const PTabletWriterOpenRequest& request);
     Status _write_block_data(const PTabletWriterAddBlockRequest& request, int64_t cur_seq,
@@ -178,7 +172,7 @@ protected:
     State _state;
 
     UniqueId _load_id;
-    std::shared_ptr<AtomicStatus> _load_cancel_status;
+    std::shared_ptr<ThreadPoolTokenCancellation> _load_cancel_status;
 
     // initialized in open function
     int64_t _txn_id = -1;

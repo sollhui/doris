@@ -186,8 +186,8 @@ Status LoadChannelMgr::add_batch(const PTabletWriterAddBlockRequest& request,
     // this case will be handled in load channel's add batch method.
     Status st = channel->add_batch(request, response);
     if (UNLIKELY(!st.ok())) {
-        // Release the manager's ownership too. Cancellation only publishes a signal;
-        // the last in-flight request drains the writers when releasing the channel.
+        // Release the manager's ownership too. Cancellation drains bitmap tokens;
+        // the last in-flight request releases the writers with the channel.
         PTabletWriterCancelRequest cancel_request;
         *cancel_request.mutable_id() = request.id();
         cancel_request.set_cancel_reason(st.to_string());
@@ -229,7 +229,6 @@ Status LoadChannelMgr::cancel(const PTabletWriterCancelRequest& params) {
         std::lock_guard<std::mutex> l(_lock);
         if (_load_channels.contains(load_id)) {
             cancelled_channel = _load_channels[load_id];
-            RETURN_IF_ERROR(cancelled_channel->cancel(Status::Cancelled(reason)));
             _load_channels.erase(load_id);
         }
         // We just need to record the first cancel msg
@@ -251,6 +250,9 @@ Status LoadChannelMgr::cancel(const PTabletWriterCancelRequest& params) {
     }
 
     if (cancelled_channel != nullptr) {
+        // Token shutdown waits only for running bitmap tasks. Do not hold the
+        // manager lock while waiting, or take any channel/writer lock.
+        RETURN_IF_ERROR(cancelled_channel->cancel(Status::Cancelled(reason)));
         LOG(INFO) << "load channel has been cancelled: " << load_id;
     }
 

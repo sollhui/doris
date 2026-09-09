@@ -36,6 +36,7 @@
 
 namespace doris {
 
+class ThreadPoolTokenCancellation;
 class DataDir;
 class Tablet;
 enum RowsetTypePB : int;
@@ -48,11 +49,10 @@ enum RowsetTypePB : int;
 // 4. call `get_delete_bitmap()` to get the result of all tasks
 class CalcDeleteBitmapToken {
 public:
-    explicit CalcDeleteBitmapToken(std::unique_ptr<ThreadPoolToken> thread_token,
-                                   std::shared_ptr<AtomicStatus> load_cancel_status = nullptr)
-            : _thread_token(std::move(thread_token)),
-              _status(Status::OK()),
-              _load_cancel_status(std::move(load_cancel_status)) {}
+    explicit CalcDeleteBitmapToken(
+            std::unique_ptr<ThreadPoolToken> thread_token,
+            std::shared_ptr<ThreadPoolTokenCancellation> load_cancel_status = nullptr);
+    ~CalcDeleteBitmapToken();
 
     // calculate delete bitmap of `cur_segment` to historical `target_rowsets`
     Status submit(BaseTabletSPtr tablet, RowsetSharedPtr cur_rowset,
@@ -96,13 +96,13 @@ public:
 private:
     Status _get_status();
 
-    std::unique_ptr<ThreadPoolToken> _thread_token;
+    std::shared_ptr<ThreadPoolToken> _thread_token;
 
     std::shared_mutex _lock;
     // Records the current status of the calc delete bitmap job.
     // Note: Once its value is set to Failed, it cannot return to SUCCESS.
     Status _status;
-    const std::shared_ptr<AtomicStatus> _load_cancel_status;
+    const std::shared_ptr<ThreadPoolTokenCancellation> _load_cancel_status;
 };
 
 // CalcDeleteBitmapExecutor is responsible for calc delete bitmap concurrently.
@@ -116,7 +116,7 @@ public:
     void init(const std::string& name, int max_threads);
 
     std::unique_ptr<CalcDeleteBitmapToken> create_token(
-            std::shared_ptr<AtomicStatus> load_cancel_status = nullptr);
+            std::shared_ptr<ThreadPoolTokenCancellation> load_cancel_status = nullptr);
 
 private:
     std::unique_ptr<ThreadPool> _thread_pool;

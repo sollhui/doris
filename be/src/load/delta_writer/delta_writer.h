@@ -105,11 +105,7 @@ public:
             google::protobuf::RepeatedPtrField<PTabletLoadRowsetInfo>* tablet_info);
 
 protected:
-    Status _get_load_cancel_status() const {
-        return _req.load_cancel_status && !_req.load_cancel_status->ok()
-                       ? _req.load_cancel_status->status()
-                       : Status::OK();
-    }
+    Status _get_load_cancel_status() const;
 
     virtual void _init_profile(RuntimeProfile* profile);
 

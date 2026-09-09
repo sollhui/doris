@@ -49,6 +49,7 @@
 #include "storage/tablet_info.h"
 #include "storage/txn/txn_manager.h"
 #include "util/defer_op.h"
+#include "util/threadpool_token_cancellation.h"
 
 namespace doris {
 class SlotDescriptor;
@@ -86,6 +87,14 @@ BaseTabletsChannel::~BaseTabletsChannel() {
 }
 
 TabletsChannel::~TabletsChannel() = default;
+
+Status BaseTabletsChannel::_check_cancelled() {
+    if (_load_cancel_status && !_load_cancel_status->ok()) {
+        _close_status = _load_cancel_status->status();
+        return _close_status;
+    }
+    return Status::OK();
+}
 
 Status BaseTabletsChannel::_get_current_seq(int64_t& cur_seq,
                                             const PTabletWriterAddBlockRequest& request) {

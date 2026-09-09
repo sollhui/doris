@@ -22,6 +22,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include "cloud/cloud_delta_writer.h"
@@ -281,13 +282,14 @@ TEST_P(DeltaWriterCancelTest, LoadCancelWhileCloseHoldsLocks) {
     request.set_cancel_reason("sender cancelled while close waits");
     auto canceller = std::async(std::launch::async, [&] { return manager.cancel(request); });
     auto cancel_ready = canceller.wait_for(std::chrono::seconds(10));
-    // The signal does not drain the queue. wait() completes after workers dequeue
-    // and skip the cancelled tasks, even while close retains its locks.
-    EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
-    EXPECT_EQ(_pool->get_queue_size(), _tokens.size());
+    auto wait_ready = waiter.wait_for(std::chrono::seconds(10));
+    // The unrelated worker remains blocked: queued bitmap work must not delay
+    // either cancellation or the close waiter.
+    EXPECT_EQ(_pool->get_queue_size(), 0);
     // Always unblock the pool before joining, including when the regression reappears.
     _release_worker.count_down();
     EXPECT_EQ(cancel_ready, std::future_status::ready);
+    EXPECT_EQ(wait_ready, std::future_status::ready);
     EXPECT_TRUE(canceller.get().ok());
     const auto cancelled = Status::Cancelled(request.cancel_reason());
     for (const auto& st : waiter.get()) {
@@ -314,7 +316,7 @@ TEST_P(DeltaWriterCancelTest, LoadCancelWhileCloseHoldsLocks) {
     EXPECT_TRUE(manager.open(open_request).is<ErrorCode::CANCELLED>());
 }
 
-TEST_P(DeltaWriterCancelTest, QueuedTasksObserveLoadCancellationWithoutWait) {
+TEST_P(DeltaWriterCancelTest, LoadCancelRemovesQueuedTasksWithoutWait) {
     install_tokens();
     ASSERT_TRUE(_pool->submit_func([this] {
                          _worker_started.count_down();
@@ -329,7 +331,8 @@ TEST_P(DeltaWriterCancelTest, QueuedTasksObserveLoadCancellationWithoutWait) {
     }
     const auto cancelled = Status::Cancelled("load cancelled before queued tasks start");
     ASSERT_TRUE(_load_channel->cancel(cancelled).ok());
-    // Allow workers to dequeue the tasks before calling wait/cancel on any writer or token.
+    // Cancellation removes queued tasks without waiting for the unrelated worker.
+    EXPECT_EQ(_pool->get_queue_size(), 0);
     _release_worker.count_down();
     _pool->wait();
     EXPECT_EQ(_executed.load(), 0);
@@ -352,13 +355,50 @@ TEST_P(DeltaWriterCancelTest, RunningTaskFinishesBeforeCancelledWaitReturns) {
                         })
                         .ok());
     ASSERT_TRUE(_worker_started.wait_for(std::chrono::seconds(10)));
+    // This task must never run after the running task is released.
+    ASSERT_TRUE(_tokens.front()
+                        ->submit_func([this] {
+                            ++_executed;
+                            return Status::OK();
+                        })
+                        .ok());
     const auto cancelled = Status::Cancelled("cancel running load");
-    ASSERT_TRUE(_load_channel->cancel(cancelled).ok());
+    auto canceller =
+            std::async(std::launch::async, [&] { return _load_channel->cancel(cancelled); });
     auto waiter = std::async(std::launch::async, [&] { return _tokens.front()->wait(); });
-    EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(200)), std::future_status::timeout);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!_load_channel->is_cancelled() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(_load_channel->is_cancelled());
+    EXPECT_EQ(canceller.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
     _release_worker.count_down();
+    EXPECT_TRUE(canceller.get().ok());
     EXPECT_EQ(waiter.get(), cancelled);
     EXPECT_EQ(_executed.load(), 1);
+}
+
+TEST_P(DeltaWriterCancelTest, TokenDestructionDuringLoadCancellation) {
+    auto token = make_token();
+    ASSERT_TRUE(token->submit_func([this] {
+                         _worker_started.count_down();
+                         _release_worker.wait();
+                         ++_executed;
+                         return Status::OK();
+                     }).ok());
+    ASSERT_TRUE(_worker_started.wait_for(std::chrono::seconds(10)));
+    auto canceller = std::async(std::launch::async, [&] { return _load_channel->cancel(); });
+    auto destroyer =
+            std::async(std::launch::async, [token = std::move(token)]() mutable { token.reset(); });
+    // Both shutdown paths must preserve the callback's state until it finishes.
+    EXPECT_EQ(canceller.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+    EXPECT_EQ(destroyer.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+    _release_worker.count_down();
+    EXPECT_TRUE(canceller.get().ok());
+    destroyer.get();
+    EXPECT_EQ(_executed.load(), 1);
+    EXPECT_TRUE(_load_channel->cancel().ok());
 }
 
 INSTANTIATE_TEST_SUITE_P(LocalAndCloud, DeltaWriterCancelTest, testing::Values(0, 1, 2, 3));

@@ -24,10 +24,28 @@
 #include "common/logging.h"
 #include "load/memtable/memtable.h"
 #include "storage/tablet/base_tablet.h"
+#include "util/threadpool_token_cancellation.h"
 #include "util/time.h"
 
 namespace doris {
 using namespace ErrorCode;
+
+CalcDeleteBitmapToken::CalcDeleteBitmapToken(
+        std::unique_ptr<ThreadPoolToken> thread_token,
+        std::shared_ptr<ThreadPoolTokenCancellation> load_cancel_status)
+        : _thread_token(std::move(thread_token)),
+          _status(Status::OK()),
+          _load_cancel_status(std::move(load_cancel_status)) {
+    if (_load_cancel_status) {
+        _load_cancel_status->register_token(_thread_token);
+    }
+}
+
+CalcDeleteBitmapToken::~CalcDeleteBitmapToken() {
+    // A concurrent cancellation can retain the underlying token. Finish callbacks
+    // that capture this before destroying the wrapper's status and lock.
+    _thread_token->shutdown();
+}
 
 Status CalcDeleteBitmapToken::submit(BaseTabletSPtr tablet, RowsetSharedPtr cur_rowset,
                                      const segment_v2::SegmentSharedPtr& cur_segment,
@@ -101,7 +119,7 @@ void CalcDeleteBitmapExecutor::init(const std::string& name, int max_threads) {
 }
 
 std::unique_ptr<CalcDeleteBitmapToken> CalcDeleteBitmapExecutor::create_token(
-        std::shared_ptr<AtomicStatus> load_cancel_status) {
+        std::shared_ptr<ThreadPoolTokenCancellation> load_cancel_status) {
     return std::make_unique<CalcDeleteBitmapToken>(
             _thread_pool->new_token(ThreadPool::ExecutionMode::CONCURRENT),
             std::move(load_cancel_status));
