@@ -58,7 +58,7 @@ struct WriteRequest {
     std::string storage_vault_id;
     bool enable_table_memtable_backpressure = false;
     // Shared by all writers of a load; published before writers can submit work.
-    std::shared_ptr<AtomicStatus> load_cancel_status;
+    std::shared_ptr<AtomicStatus> load_cancel_status = nullptr;
 };
 
 struct TabletAddRowsPayload {
