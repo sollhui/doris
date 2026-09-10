@@ -42,7 +42,7 @@ LoadChannel::LoadChannel(const UniqueId& load_id, int64_t timeout_s, bool is_hig
                          std::string sender_ip, int64_t backend_id, bool enable_profile,
                          int64_t wg_id)
         : _load_id(load_id),
-          _cancel_status(std::make_shared<DeleteBitmapCancellation>()),
+          _cancel_status(std::make_shared<DeleteBitmapCancellation>(_load_id.to_string())),
           _timeout_s(timeout_s),
           _is_high_priority(is_high_priority),
           _sender_ip(std::move(sender_ip)),

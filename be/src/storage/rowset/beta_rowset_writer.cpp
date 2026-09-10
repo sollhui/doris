@@ -514,7 +514,7 @@ Status BetaRowsetWriter::init(const RowsetWriterContext& rowset_writer_context) 
     }
     if (_context.mow_context != nullptr) {
         _calc_delete_bitmap_token = _engine.calc_delete_bitmap_executor_for_load()->create_token(
-                _context.load_cancel_status);
+                _context.load_cancel_status, DeleteBitmapPhase::FOR_LOAD);
     }
     return Status::OK();
 }

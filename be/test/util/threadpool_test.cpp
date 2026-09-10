@@ -503,6 +503,38 @@ TEST_P(ThreadPoolTestTokenTypes, TestTokenShutdown) {
     t2->shutdown();
 }
 
+TEST_P(ThreadPoolTestTokenTypes, TestTokenShutdownStats) {
+    ASSERT_TRUE(
+            rebuild_pool_with_builder(ThreadPoolBuilder(kDefaultPoolName).set_max_threads(1)).ok());
+    auto token = _pool->new_token(GetParam());
+    CountDownLatch running(1);
+    CountDownLatch release(1);
+    Defer unblock = [&] { release.count_down(); };
+    ASSERT_TRUE(token->submit_func([&] {
+                         running.count_down();
+                         release.wait();
+                     }).ok());
+    ASSERT_TRUE(running.wait_for(std::chrono::seconds(10)));
+    ASSERT_TRUE(token->submit_func([] {}).ok());
+    auto snapshot = token->task_stats();
+    EXPECT_EQ(snapshot.queued, 1);
+    EXPECT_EQ(snapshot.running, 1);
+    ThreadPoolToken::TaskStats removed;
+    std::thread stopper([&] { token->shutdown(&removed); });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (token->num_tasks() != 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    EXPECT_EQ(token->num_tasks(), 0);
+    release.count_down();
+    stopper.join();
+    EXPECT_EQ(removed.queued, 1);
+    EXPECT_EQ(removed.running, 1);
+    token->shutdown(&removed);
+    EXPECT_EQ(removed.queued, 0);
+    EXPECT_EQ(removed.running, 0);
+}
+
 TEST_P(ThreadPoolTestTokenTypes, TestTokenWaitForAll) {
     const int kNumTokens = 3;
     const int kNumSubmissions = 20;

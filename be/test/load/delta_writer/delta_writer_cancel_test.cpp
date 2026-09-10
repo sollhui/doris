@@ -130,7 +130,7 @@ protected:
             }
             // Set up only the state needed by cancellation and destruction. No files are created.
             rowset_writer->_rowset_meta = std::make_shared<RowsetMeta>();
-            rowset_writer->_calc_delete_bitmap_token = make_token();
+            rowset_writer->_calc_delete_bitmap_token = make_token(DeleteBitmapPhase::FOR_LOAD);
             builder->_calc_delete_bitmap_token = make_token();
             builder->_rowset_writer = rowset_writer;
             _tokens.push_back(rowset_writer->_calc_delete_bitmap_token.get());
@@ -144,10 +144,11 @@ protected:
         }
     }
 
-    std::unique_ptr<CalcDeleteBitmapToken> make_token() {
+    std::unique_ptr<CalcDeleteBitmapToken> make_token(
+            DeleteBitmapPhase phase = DeleteBitmapPhase::ROWSET_BUILDER) {
         return std::make_unique<CalcDeleteBitmapToken>(
                 _pool->new_token(ThreadPool::ExecutionMode::CONCURRENT),
-                _load_channel->_cancel_status);
+                _load_channel->_cancel_status, phase);
     }
 
     FragmentMgr* _previous_fragment_mgr = nullptr;
@@ -342,6 +343,67 @@ TEST_P(DeltaWriterCancelTest, LoadCancelRemovesQueuedTasksWithoutWait) {
         EXPECT_EQ(token->wait(), cancelled);
         EXPECT_EQ(token->submit_func([] { return Status::OK(); }), cancelled);
     }
+    const auto count = static_cast<int64_t>(_builders.size());
+    auto& load = _load_channel->_cancel_status->_counters(DeleteBitmapPhase::FOR_LOAD);
+    auto& builder = _load_channel->_cancel_status->_counters(DeleteBitmapPhase::ROWSET_BUILDER);
+    for (auto* c : {&load, &builder}) {
+        EXPECT_EQ(c->snapshot_queued.load(), count);
+        EXPECT_EQ(c->snapshot_running.load(), 0);
+        EXPECT_EQ(c->discarded_by_load.load(), count);
+        EXPECT_EQ(c->discarded_by_owner.load(), 0);
+        EXPECT_EQ(c->body_started.load(), 0);
+        EXPECT_EQ(c->body_finished.load(), 0);
+        EXPECT_EQ(c->skipped_after_cancel.load(), 0);
+        EXPECT_EQ(c->submitted.load(), count);
+    }
+    EXPECT_EQ(load.rejected_after_cancel.load(), count);
+    EXPECT_EQ(builder.rejected_after_cancel.load(), count + 1);
+    EXPECT_EQ(builder.late_tokens.load(), 1);
+    ASSERT_TRUE(_load_channel->cancel(cancelled).ok());
+    EXPECT_EQ(load.discarded_by_load.load(), count);
+    EXPECT_EQ(builder.discarded_by_load.load(), count);
+}
+
+TEST_P(DeltaWriterCancelTest, DistinguishOwnerDiscardFromLoadDiscard) {
+    auto token = make_token(DeleteBitmapPhase::FOR_LOAD);
+    ASSERT_TRUE(_pool->submit_func([this] {
+                         _worker_started.count_down();
+                         _release_worker.wait();
+                     }).ok());
+    ASSERT_TRUE(_worker_started.wait_for(std::chrono::seconds(10)));
+    ASSERT_TRUE(token->submit_func([] { return Status::OK(); }).ok());
+    token->cancel();
+    ASSERT_TRUE(_load_channel->cancel().ok());
+    auto& c = _load_channel->_cancel_status->_counters(DeleteBitmapPhase::FOR_LOAD);
+    EXPECT_EQ(c.snapshot_queued.load(), 0);
+    EXPECT_EQ(c.discarded_by_owner.load(), 1);
+    EXPECT_EQ(c.discarded_by_load.load(), 0);
+    token.reset();
+    EXPECT_EQ(c.discarded_by_owner.load(), 1);
+}
+
+TEST_P(DeltaWriterCancelTest, DistinguishDequeuedSkipFromQueueRemoval) {
+    auto token = make_token(DeleteBitmapPhase::FOR_LOAD);
+    ASSERT_TRUE(_pool->submit_func([this] {
+                         _worker_started.count_down();
+                         _release_worker.wait();
+                     }).ok());
+    ASSERT_TRUE(_worker_started.wait_for(std::chrono::seconds(10)));
+    ASSERT_TRUE(token->submit_func([this] {
+                         ++_executed;
+                         return Status::OK();
+                     }).ok());
+    // Model the interval after publication and before this token's shutdown.
+    _load_channel->_cancel_status->_status.update(Status::Cancelled("published before shutdown"));
+    _release_worker.count_down();
+    _pool->wait();
+    auto& c = _load_channel->_cancel_status->_counters(DeleteBitmapPhase::FOR_LOAD);
+    EXPECT_EQ(_executed.load(), 0);
+    EXPECT_EQ(c.submitted.load(), 1);
+    EXPECT_EQ(c.body_started.load(), 0);
+    EXPECT_EQ(c.skipped_after_cancel.load(), 1);
+    EXPECT_EQ(c.discarded_by_load.load(), 0);
+    EXPECT_EQ(c.discarded_by_owner.load(), 0);
 }
 
 TEST_P(DeltaWriterCancelTest, RunningTaskFinishesBeforeCancelledWaitReturns) {

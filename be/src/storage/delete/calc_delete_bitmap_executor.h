@@ -19,6 +19,7 @@
 
 #include <stdint.h>
 
+#include <array>
 #include <atomic>
 #include <iosfwd>
 #include <memory>
@@ -41,9 +42,14 @@ class DataDir;
 class Tablet;
 enum RowsetTypePB : int;
 
+enum class DeleteBitmapPhase { FOR_LOAD, ROWSET_BUILDER };
+
 // Per-load cancellation shared by for-load and rowset-builder bitmap tokens.
 class DeleteBitmapCancellation {
 public:
+    explicit DeleteBitmapCancellation(std::string load_id = "") : _load_id(std::move(load_id)) {}
+    ~DeleteBitmapCancellation();
+
     bool ok() const { return _status.ok(); }
     Status status() const { return _status.ok() ? Status::OK() : _status.status(); }
 
@@ -53,12 +59,36 @@ public:
 
 private:
     friend class CalcDeleteBitmapToken;
-    void _register_token(const std::shared_ptr<ThreadPoolToken>& token);
+    struct Counters {
+        std::atomic<int64_t> tokens {0};
+        std::atomic<int64_t> late_tokens {0};
+        std::atomic<int64_t> snapshot_queued {0};
+        std::atomic<int64_t> snapshot_running {0};
+        std::atomic<int64_t> discarded_by_load {0};
+        std::atomic<int64_t> discarded_by_owner {0};
+        std::atomic<int64_t> submitted {0};
+        std::atomic<int64_t> body_started {0};
+        std::atomic<int64_t> body_finished {0};
+        std::atomic<int64_t> rejected_after_cancel {0};
+        std::atomic<int64_t> skipped_after_cancel {0};
+    };
+    struct RegisteredToken {
+        std::weak_ptr<ThreadPoolToken> token;
+        DeleteBitmapPhase phase;
+    };
+    Counters& _counters(DeleteBitmapPhase phase) {
+        return _phase_counters[static_cast<size_t>(phase)];
+    }
+    void _register_token(const std::shared_ptr<ThreadPoolToken>& token, DeleteBitmapPhase phase);
+    void _log_stats(const char* stage, int64_t elapsed_us) const;
 
+    const std::string _load_id;
+    std::array<Counters, 2> _phase_counters;
+    std::atomic<int64_t> _cancel_calls {0};
     AtomicStatus _status;
     std::mutex _lock;
     // Do not keep finished writers' tokens or their thread pools alive.
-    std::vector<std::weak_ptr<ThreadPoolToken>> _tokens;
+    std::vector<RegisteredToken> _tokens;
 };
 
 // A thin wrapper of ThreadPoolToken to submit calc delete bitmap task.
@@ -71,7 +101,8 @@ class CalcDeleteBitmapToken {
 public:
     explicit CalcDeleteBitmapToken(
             std::unique_ptr<ThreadPoolToken> thread_token,
-            std::shared_ptr<DeleteBitmapCancellation> load_cancel_status = nullptr);
+            std::shared_ptr<DeleteBitmapCancellation> load_cancel_status = nullptr,
+            DeleteBitmapPhase phase = DeleteBitmapPhase::ROWSET_BUILDER);
     ~CalcDeleteBitmapToken();
 
     // calculate delete bitmap of `cur_segment` to historical `target_rowsets`
@@ -89,15 +120,30 @@ public:
     // submit a generic function to the thread pool
     template <typename Func>
     Status submit_func(Func&& func) {
-        RETURN_IF_ERROR(_get_status());
+        auto status = _get_status();
+        if (!status.ok()) {
+            _record_rejected_submission();
+            return status;
+        }
         auto resource_ctx = thread_context()->resource_ctx();
-        return _thread_token->submit_func(
+        status = _thread_token->submit_func(
                 [this, resource_ctx = std::move(resource_ctx), func = std::forward<Func>(func)]() {
                     SCOPED_ATTACH_TASK(resource_ctx);
                     // Cancellation can arrive while the owning channel is blocked in close().
                     auto st = _get_status();
                     if (st.ok()) {
+                        if (_load_cancel_status) {
+                            _load_cancel_status->_counters(_phase).body_started.fetch_add(
+                                    1, std::memory_order_relaxed);
+                        }
                         st = func();
+                        if (_load_cancel_status) {
+                            _load_cancel_status->_counters(_phase).body_finished.fetch_add(
+                                    1, std::memory_order_relaxed);
+                        }
+                    } else if (_load_cancel_status && !_load_cancel_status->ok()) {
+                        _load_cancel_status->_counters(_phase).skipped_after_cancel.fetch_add(
+                                1, std::memory_order_relaxed);
                     }
                     if (!st.ok()) {
                         std::lock_guard wlock(_lock);
@@ -106,6 +152,15 @@ public:
                         }
                     }
                 });
+        if (status.ok()) {
+            if (_load_cancel_status) {
+                _load_cancel_status->_counters(_phase).submitted.fetch_add(
+                        1, std::memory_order_relaxed);
+            }
+        } else {
+            _record_rejected_submission();
+        }
+        return status;
     }
 
     // wait all tasks in token to be completed.
@@ -115,6 +170,8 @@ public:
 
 private:
     Status _get_status();
+    void _record_rejected_submission();
+    void _shutdown();
 
     std::shared_ptr<ThreadPoolToken> _thread_token;
 
@@ -123,6 +180,7 @@ private:
     // Note: Once its value is set to Failed, it cannot return to SUCCESS.
     Status _status;
     const std::shared_ptr<DeleteBitmapCancellation> _load_cancel_status;
+    const DeleteBitmapPhase _phase;
 };
 
 // CalcDeleteBitmapExecutor is responsible for calc delete bitmap concurrently.
@@ -136,7 +194,8 @@ public:
     void init(const std::string& name, int max_threads);
 
     std::unique_ptr<CalcDeleteBitmapToken> create_token(
-            std::shared_ptr<DeleteBitmapCancellation> load_cancel_status = nullptr);
+            std::shared_ptr<DeleteBitmapCancellation> load_cancel_status = nullptr,
+            DeleteBitmapPhase phase = DeleteBitmapPhase::ROWSET_BUILDER);
 
 private:
     std::unique_ptr<ThreadPool> _thread_pool;

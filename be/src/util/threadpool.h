@@ -428,6 +428,14 @@ private:
 // ThreadPool's lock.
 class ThreadPoolToken {
 public:
+    struct TaskStats {
+        size_t queued = 0;
+        size_t running = 0;
+    };
+
+    // Snapshot both values under the pool lock.
+    TaskStats task_stats() const;
+
     // Destroys the token.
     //
     // May be called on a token with outstanding tasks, as Shutdown() will be
@@ -443,7 +451,9 @@ public:
     // Marks the token as unusable for future submissions. Any queued tasks not
     // yet running are destroyed. If tasks are in flight, Shutdown() will wait
     // on their completion before returning.
-    void shutdown();
+    // When supplied, stats records the exact number removed from this token's
+    // queue and its running callbacks, under the same lock as queue removal.
+    void shutdown(TaskStats* stats = nullptr);
 
     // Waits until all the tasks submitted via this token are completed.
     void wait();

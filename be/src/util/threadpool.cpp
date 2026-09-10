@@ -121,9 +121,18 @@ Status ThreadPoolToken::submit_func(std::function<void()> f) {
     return submit(std::make_shared<FunctionRunnable>(std::move(f)));
 }
 
-void ThreadPoolToken::shutdown() {
+ThreadPoolToken::TaskStats ThreadPoolToken::task_stats() const {
+    std::lock_guard l(_pool->_lock);
+    return {_entries.size(), static_cast<size_t>(_active_threads)};
+}
+
+void ThreadPoolToken::shutdown(TaskStats* stats) {
     std::unique_lock<std::mutex> l(_pool->_lock);
     _pool->check_not_pool_thread_unlocked();
+
+    if (stats != nullptr) {
+        *stats = {_entries.size(), static_cast<size_t>(_active_threads)};
+    }
 
     // Clear the queue under the lock, but defer the releasing of the tasks
     // outside the lock, in case there are concurrent threads wanting to access
