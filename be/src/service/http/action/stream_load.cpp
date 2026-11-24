@@ -59,6 +59,7 @@
 #include "runtime/exec_env.h"
 #include "service/http/action/action_constants.h"
 #include "service/http/http_channel.h"
+#include "service/http/http_client.h"
 #include "service/http/http_common.h"
 #include "service/http/http_headers.h"
 #include "service/http/http_request.h"
@@ -66,7 +67,9 @@
 #include "storage/storage_engine.h"
 #include "util/byte_buffer.h"
 #include "util/client_cache.h"
+#include "util/debug_points.h"
 #include "util/load_util.h"
+#include "util/network_util.h"
 #include "util/string_util.h"
 #include "util/thrift_rpc_helper.h"
 #include "util/time.h"
@@ -458,6 +461,51 @@ void StreamLoadAction::free_handler_ctx(std::shared_ptr<void> param) {
     streaming_load_current_processing->increment(-1);
 }
 
+#ifndef BE_TEST
+// An empty address leaves planning on the existing master RPC path.
+static Status get_group_commit_planning_follower(const ClusterInfo& cluster,
+                                                 const TStreamLoadPutRequest& request,
+                                                 TNetworkAddress* follower) {
+    if (cluster.master_fe_http_port == 0 || cluster.curr_auth_token.empty()) {
+        return Status::OK();
+    }
+    HttpClient client;
+    auto endpoint = get_host_port(cluster.master_fe_addr.hostname, cluster.master_fe_http_port);
+    // Never forward the internal auth header to a redirect target.
+    RETURN_IF_ERROR(client.init((config::enable_https ? "https://" : "http://") + endpoint +
+                                        "/api/_group_commit_plan_route",
+                                false, HttpClient::AuthTokenMode::CLUSTER, false));
+    // A slow or unreachable HTTP endpoint must leave time for the master RPC.
+    client.set_timeout_ms(std::min(config::thrift_rpc_timeout_ms, 10000));
+    std::string db;
+    std::string table;
+    url_encode(request.db, &db);
+    url_encode(request.tbl, &table);
+    std::string body;
+    auto st = client.execute_post_request(fmt::format("db={}&table={}", db, table), &body);
+    long code = client.get_http_status();
+    if (code == 403) {
+        return Status::NotAuthorized("Master rejected group commit routing token");
+    }
+    if (code == 503) {
+        return Status::RpcError("Group commit route unavailable: {}", body);
+    }
+    // Old FEs may serve HTML or a JSON error with HTTP 200 for an unknown path.
+    // Fall back to the normal master RPC, which performs its own precheck.
+    if (!st.ok() || code == 204 || (code >= 300 && code < 400) || code == 404 || code == 405 ||
+        (code == 200 && !client.get_response_content_type().starts_with("text/plain"))) {
+        return Status::OK();
+    }
+    uint16_t port = 0;
+    if (code != 200 || !parse_endpoint(body, &follower->hostname, &port) || port == 0) {
+        return Status::RpcError("Invalid group commit planning route from {} (HTTP {})", endpoint,
+                                code);
+    }
+    follower->port = port;
+    return Status::OK();
+}
+#endif
+
 Status StreamLoadAction::_process_put(HttpRequest* http_req,
                                       std::shared_ptr<StreamLoadContext> ctx) {
     // Now we use stream
@@ -822,13 +870,36 @@ Status StreamLoadAction::_process_put(HttpRequest* http_req,
 
 #ifndef BE_TEST
     // plan this load
-    TNetworkAddress master_addr = _exec_env->cluster_info()->master_fe_addr;
     int64_t stream_load_put_start_time = MonotonicNanos();
-    RETURN_IF_ERROR(ThriftRpcHelper::rpc<FrontendServiceClient>(
-            master_addr.hostname, master_addr.port,
-            [&request, ctx](FrontendServiceConnection& client) {
-                client->streamLoadPut(ctx->put_result, request);
-            }));
+    auto put = [&request, ctx](FrontendServiceConnection& client) {
+        client->streamLoadPut(ctx->put_result, request);
+    };
+    TNetworkAddress follower;
+    if (ctx->group_commit) {
+        RETURN_IF_ERROR(
+                get_group_commit_planning_follower(*_exec_env->cluster_info(), request, &follower));
+    }
+    bool use_master = follower.hostname.empty();
+    if (!use_master) {
+        auto st =
+                ThriftRpcHelper::rpc<FrontendServiceClient>(follower.hostname, follower.port, put);
+        if (!st.ok()) {
+            LOG(WARNING) << "Group commit planning RPC to " << follower << " failed: " << st
+                         << ", retry via master";
+            ctx->put_result = TStreamLoadPutResult();
+            use_master = true;
+        }
+    }
+    if (use_master) {
+        DBUG_EXECUTE_IF("StreamLoadAction.require_direct_group_commit_plan", {
+            if (ctx->group_commit) {
+                return Status::InternalError("Expected direct group commit planning on a follower");
+            }
+        });
+        const auto master = _exec_env->cluster_info()->master_fe_addr;
+        RETURN_IF_ERROR(
+                ThriftRpcHelper::rpc<FrontendServiceClient>(master.hostname, master.port, put));
+    }
     ctx->stream_load_put_cost_nanos = MonotonicNanos() - stream_load_put_start_time;
 #else
     ctx->put_result = k_stream_load_put_result;

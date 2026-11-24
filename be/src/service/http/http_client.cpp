@@ -358,7 +358,7 @@ void HttpClient::reset() {
 }
 
 Status HttpClient::init(const std::string& url, bool set_fail_on_error,
-                        AuthTokenMode auth_token_mode) {
+                        AuthTokenMode auth_token_mode, bool follow_redirects) {
     reset();
     if (_curl == nullptr) {
         _curl = curl_easy_init();
@@ -391,7 +391,7 @@ Status HttpClient::init(const std::string& url, bool set_fail_on_error,
         }
     }
     // set redirect
-    code = curl_easy_setopt(_curl, CURLOPT_FOLLOWLOCATION, 1L);
+    code = curl_easy_setopt(_curl, CURLOPT_FOLLOWLOCATION, follow_redirects ? 1L : 0L);
     if (code != CURLE_OK) {
         LOG(WARNING) << "fail to set CURLOPT_FOLLOWLOCATION, msg=" << _to_errmsg(code);
         return Status::InternalError("fail to set CURLOPT_FOLLOWLOCATION");

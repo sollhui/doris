@@ -31,6 +31,8 @@ import org.apache.doris.common.LoadException;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.util.DebugPointUtil;
 import org.apache.doris.common.util.SlidingWindowCounter;
+import org.apache.doris.ha.FrontendNodeType;
+import org.apache.doris.planner.GroupCommitPlanner;
 import org.apache.doris.proto.InternalService.PGetWalQueueSizeRequest;
 import org.apache.doris.proto.InternalService.PGetWalQueueSizeResponse;
 import org.apache.doris.qe.ConnectContext;
@@ -39,6 +41,8 @@ import org.apache.doris.resource.BackendSelection;
 import org.apache.doris.resource.BackendSelectionManager;
 import org.apache.doris.rpc.BackendServiceProxy;
 import org.apache.doris.system.Backend;
+import org.apache.doris.system.Frontend;
+import org.apache.doris.system.SystemInfoService.HostInfo;
 import org.apache.doris.thrift.TNetworkAddress;
 import org.apache.doris.thrift.TStatusCode;
 
@@ -51,18 +55,20 @@ import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 public class GroupCommitManager {
 
     private static final Logger LOG = LogManager.getLogger(GroupCommitManager.class);
 
-    private Set<Long> blockedTableIds = new HashSet<>();
+    private final Set<Long> blockedTableIds = ConcurrentHashMap.newKeySet();
+    private final AtomicInteger planningFollowerIndex = new AtomicInteger();
 
     // Selection preferences are part of the bounded cache key.
     private final Cache<String, Long> tableToBeMap = CacheBuilder.newBuilder()
@@ -76,6 +82,33 @@ public class GroupCommitManager {
             .maximumSize(10000)
             .expireAfterAccess(1, TimeUnit.HOURS)
             .build();
+
+    // Called on the master for both direct BE routing and legacy FE forwarding.
+    @Nullable
+    public TNetworkAddress selectPlanningFollower(String dbName, String tableName)
+            throws DdlException, AnalysisException {
+        Env env = Env.getCurrentEnv();
+        HostInfo self = env.getSelfNode();
+        List<Frontend> followers = env.getFrontends(FrontendNodeType.FOLLOWER).stream()
+                .filter(fe -> fe.isAlive() && !(fe.getHost().equals(self.getHost())
+                        && fe.getEditLogPort() == self.getPort()))
+                .collect(Collectors.toList());
+        if (followers.isEmpty()) {
+            return null;
+        }
+        OlapTable table = Env.getCurrentInternalCatalog().getDbOrDdlException(dbName)
+                .getOlapTableOrDdlException(tableName);
+        if (!table.getTableProperty().getUseSchemaLightChange()) {
+            throw new AnalysisException(
+                    "table light_schema_change is false, can't do stream load with group commit mode");
+        }
+        if (isBlock(table.getId())) {
+            throw new AnalysisException("insert table " + table.getId() + GroupCommitPlanner.SCHEMA_CHANGE);
+        }
+        int index = Math.floorMod(planningFollowerIndex.getAndIncrement(), followers.size());
+        Frontend follower = followers.get(index);
+        return new TNetworkAddress(follower.getHost(), follower.getRpcPort());
+    }
 
     public boolean isBlock(long tableId) {
         return blockedTableIds.contains(tableId);

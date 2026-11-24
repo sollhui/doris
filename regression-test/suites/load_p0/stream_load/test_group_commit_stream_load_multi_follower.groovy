@@ -71,6 +71,7 @@ suite('test_group_commit_stream_load_multi_follower', 'docker') {
     options.cloudMode = true
     options.useFollowersMode = true
     options.beConfigs.add('enable_java_support=false')
+    options.beConfigs.add('enable_debug_points=true')
     options.feConfigs.add('enable_forward_group_commit_stream_load_to_follower=true')
     options.feConfigs.add('cloud_cluster_check_interval_second=1')
     options.feConfigs.add('heartbeat_interval_second=1')
@@ -108,11 +109,17 @@ suite('test_group_commit_stream_load_multi_follower', 'docker') {
 
         def expectedRowCount = 0
         def frontends = cluster.getAllFrontends(true).sort { it.index }
-        for (int i = 0; i < 2; i++) {
-            frontends.each { fe ->
-                groupCommitStreamLoad(fe)
-                expectedRowCount += 2
+        def directPlan = 'StreamLoadAction.require_direct_group_commit_plan'
+        GetDebugPoint().enableDebugPointForAllBEs(directPlan)
+        try {
+            for (int i = 0; i < 2; i++) {
+                frontends.each { fe ->
+                    groupCommitStreamLoad(fe)
+                    expectedRowCount += 2
+                }
             }
+        } finally {
+            GetDebugPoint().disableDebugPointForAllBEs(directPlan)
         }
         getRowCount(expectedRowCount)
 

@@ -59,7 +59,8 @@ public:
     // this function must call before other function,
     // you can call this multiple times to reuse this object
     Status init(const std::string& url, bool set_fail_on_error = true,
-                AuthTokenMode auth_token_mode = AuthTokenMode::CLUSTER);
+                AuthTokenMode auth_token_mode = AuthTokenMode::CLUSTER,
+                bool follow_redirects = true);
 
     // Release request-owned options and callbacks while retaining reusable connections.
     void reset();

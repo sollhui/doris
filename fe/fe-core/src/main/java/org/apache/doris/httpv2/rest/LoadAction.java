@@ -28,7 +28,9 @@ import org.apache.doris.common.Config;
 import org.apache.doris.common.DdlException;
 import org.apache.doris.common.LoadException;
 import org.apache.doris.common.Pair;
+import org.apache.doris.common.UserException;
 import org.apache.doris.common.util.DebugPointUtil;
+import org.apache.doris.common.util.NetUtils;
 import org.apache.doris.httpv2.entity.ResponseEntityBuilder;
 import org.apache.doris.httpv2.entity.RestBaseResult;
 import org.apache.doris.httpv2.exception.UnauthorizedException;
@@ -56,10 +58,13 @@ import org.apache.commons.validator.routines.InetAddressValidator;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.thrift.TException;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.view.RedirectView;
 
@@ -88,6 +93,33 @@ public class LoadAction extends RestBaseController {
     private ExecuteEnv execEnv = ExecuteEnv.getInstance();
 
     private int lastSelectedBackendIndex = 0;
+
+    @RequestMapping(path = "/api/_group_commit_plan_route", method = RequestMethod.POST)
+    public ResponseEntity<String> groupCommitPlanRoute(HttpServletRequest request,
+            @RequestParam("db") String db, @RequestParam("table") String table) throws UserException {
+        Env env = Env.getCurrentEnv();
+        if (!env.isMaster()) {
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body("FE is no longer master");
+        }
+        String token = request.getHeader("Auth-Token");
+        if (Strings.isNullOrEmpty(token) || !env.getTokenManager().checkAuthToken(token)) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
+        if (!Config.enable_forward_group_commit_stream_load_to_follower) {
+            return ResponseEntity.noContent().build();
+        }
+        try {
+            TNetworkAddress follower = env.getGroupCommitManager().selectPlanningFollower(db, table);
+            if (follower == null) {
+                return ResponseEntity.noContent().build();
+            }
+            return ResponseEntity.ok().contentType(MediaType.TEXT_PLAIN)
+                    .body(NetUtils.getHostPortInAccessibleFormat(follower.getHostname(), follower.getPort()));
+        } catch (AnalysisException | DdlException e) {
+            // The master RPC checks the caller's LOAD privilege before reporting table errors.
+            return ResponseEntity.noContent().build();
+        }
+    }
 
     @RequestMapping(path = "/api/{" + DB_KEY + "}/{" + TABLE_KEY + "}/_load", method = RequestMethod.PUT)
     public Object load(HttpServletRequest request, HttpServletResponse response,

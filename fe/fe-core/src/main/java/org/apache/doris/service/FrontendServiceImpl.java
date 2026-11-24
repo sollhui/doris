@@ -98,7 +98,6 @@ import org.apache.doris.datasource.ExternalDatabase;
 import org.apache.doris.datasource.InternalCatalog;
 import org.apache.doris.datasource.split.SplitSource;
 import org.apache.doris.encryption.EncryptionKey;
-import org.apache.doris.ha.FrontendNodeType;
 import org.apache.doris.info.TableRefInfo;
 import org.apache.doris.insertoverwrite.InsertOverwriteManager;
 import org.apache.doris.insertoverwrite.InsertOverwriteUtil;
@@ -123,7 +122,6 @@ import org.apache.doris.nereids.trees.plans.commands.info.ReplacePartitionOp;
 import org.apache.doris.nereids.trees.plans.distribute.PipelineDistributedPlan;
 import org.apache.doris.nereids.trees.plans.distribute.worker.job.AssignedJob;
 import org.apache.doris.persist.gson.GsonUtils;
-import org.apache.doris.planner.GroupCommitPlanner;
 import org.apache.doris.planner.OlapTableSink;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.ConnectProcessor;
@@ -152,7 +150,6 @@ import org.apache.doris.statistics.repository.ColStatsData;
 import org.apache.doris.system.Backend;
 import org.apache.doris.system.Frontend;
 import org.apache.doris.system.SystemInfoService;
-import org.apache.doris.system.SystemInfoService.HostInfo;
 import org.apache.doris.tablefunction.MetadataGenerator;
 import org.apache.doris.thrift.FrontendService;
 import org.apache.doris.thrift.TAbortRemoteTxnRequest;
@@ -390,7 +387,6 @@ public class FrontendServiceImpl implements FrontendService.Iface {
             CertificateRuntimeAuthFactory.getInstance();
 
     private static final String NOT_MASTER_ERR_MSG = "FE is not master";
-    private static final AtomicInteger GROUP_COMMIT_FOLLOWER_INDEX = new AtomicInteger(0);
 
     private MasterImpl masterImpl;
     private ExecuteEnv exeEnv;
@@ -3018,10 +3014,6 @@ public class FrontendServiceImpl implements FrontendService.Iface {
                 EtlJobType.INSERT, createTime, failMsg, trackingUrl, firstErrorMsg, userIdentity, -1);
     }
 
-    private static int nextGroupCommitFollowerIndex(int followerCount) {
-        return Math.floorMod(GROUP_COMMIT_FOLLOWER_INDEX.getAndIncrement(), followerCount);
-    }
-
     private void checkGroupCommitStreamLoadAuth(TStreamLoadPutRequest request) throws AuthenticationException {
         // Explicit group commit skips loadTxnBegin, so authenticate and authorize the standard Stream Load
         // request here before it can be forwarded or planned. Requests with load_sql use the separate HTTP
@@ -3043,44 +3035,25 @@ public class FrontendServiceImpl implements FrontendService.Iface {
     }
 
     private TStreamLoadPutResult forwardGroupCommitStreamLoad(TStreamLoadPutRequest request) {
-        HostInfo selfNode = Env.getCurrentEnv().getSelfNode();
-        List<Frontend> followers = Env.getCurrentEnv().getFrontends(FrontendNodeType.FOLLOWER).stream()
-                .filter(fe -> fe.isAlive() && !(fe.getHost().equals(selfNode.getHost())
-                        && fe.getEditLogPort() == selfNode.getPort())).collect(
-                        Collectors.toList());
-        if (CollectionUtils.isEmpty(followers)) {
-            return null;
-        }
-
-        // check table enable light_schema_change and group commit does not block for schema change
-        TStreamLoadPutResult result = new TStreamLoadPutResult();
-        TStatus status = new TStatus(TStatusCode.OK);
-        result.setStatus(status);
+        TNetworkAddress address;
         try {
-            Database db = Env.getCurrentInternalCatalog().getDbOrDdlException(request.getDb());
-            OlapTable table = (OlapTable) db.getTableOrDdlException(request.getTbl());
-            if (!table.getTableProperty().getUseSchemaLightChange()) {
-                status.setStatusCode(TStatusCode.ANALYSIS_ERROR);
-                status.addToErrorMsgs(
-                        "table light_schema_change is false, can't do stream load with group commit mode");
-                return result;
+            address = Env.getCurrentEnv().getGroupCommitManager().selectPlanningFollower(request.getDb(),
+                    request.getTbl());
+            if (address == null) {
+                return null;
             }
-            if (Env.getCurrentEnv().getGroupCommitManager().isBlock(table.getId())) {
-                String msg = "insert table " + table.getId() + GroupCommitPlanner.SCHEMA_CHANGE;
-                LOG.info(msg);
-                status.setStatusCode(TStatusCode.ANALYSIS_ERROR);
-                status.addToErrorMsgs(msg);
-                return result;
-            }
+        } catch (AnalysisException e) {
+            TStatus status = new TStatus(TStatusCode.ANALYSIS_ERROR);
+            status.addToErrorMsgs(e.getDetailMessage());
+            TStreamLoadPutResult result = new TStreamLoadPutResult();
+            result.setStatus(status);
+            return result;
         } catch (Exception e) {
             LOG.warn("failed to pre-check group commit stream load, fallback to local. db={}, tbl={}",
                     request.getDb(), request.getTbl(), e);
             return null;
         }
 
-        int idx = nextGroupCommitFollowerIndex(followers.size());
-        Frontend follower = followers.get(idx);
-        TNetworkAddress address = new TNetworkAddress(follower.getHost(), follower.getRpcPort());
         LOG.info("forward group commit stream load put to follower {}, db={}, tbl={}, groupCommitMode={}",
                 address, request.getDb(), request.getTbl(), request.getGroupCommitMode());
         FrontendService.Client client = null;
